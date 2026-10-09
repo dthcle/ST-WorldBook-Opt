@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN" data-wbo-preview><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>请求输入差异 · 精确捕获测试</title><link rel="stylesheet" href="../style.css">
+<style>
+body{background:#111723;color:#e4e8f0;font:16px system-ui;margin:24px}
+button,.menu_button{background:#252c3c;color:inherit}
+#extensionsMenu{max-width:400px;border:1px solid #445;margin:16px 0}
+body.compact{width:360px;max-width:calc(100vw - 16px);margin:8px}
+</style>
+<h1>请求输入差异 · 模拟环境</h1>
+<p>用假的捕获运行时验证界面与移动端布局，不连接酒馆、不发出任何请求。</p>
+<div id="extensionsMenu"></div>
+<p id="checks" role="status"></p>
+<script type="module">
+import {mountRequestDiff} from '../request-diff-ui.js';
+if(new URL(location.href).searchParams.has('compact'))document.body.classList.add('compact');
+const previous={model:'mock-model',source:'custom',key:'k',sentAt:new Date(Date.now()-60000).toISOString(),messages:[
+  {role:'system',content:'世界设定：现代城市。'},
+  {role:'user',content:'广场位于城市中心，人群熙攘。'},
+  {role:'user',content:'你好'},
+]};
+const current={model:'mock-model',source:'custom',key:'k',messages:[
+  {role:'system',content:'世界设定：现代城市。'},
+  {role:'user',content:'灯塔位于海港东侧，浪声不断。'},
+  {role:'user',content:'你好'},
+  {role:'assistant',content:'你好，想去哪里？'},
+  {role:'user',content:'去海边寻找灯塔'},
+]};
+let wrote=false, undoCount=0;
+const runtime={
+  getLast:()=>structuredClone(previous),
+  clear(){},
+  async captureCurrent(){wrote=true;return {previous:structuredClone(previous),current:{...current,capturedAt:new Date().toISOString()},wroteMessage:true,warnings:['这是基于酒馆“提示词查看器”的精确捕获：输入框内容已作为一条用户消息写入聊天，随后取消了 AI 请求。','提示词后处理发生在后端，浏览器无法看到。','字符前缀不代表 token 前缀或真实 API 缓存命中率。']}},
+  async undoWrittenMessage(){if(!wrote)throw new Error('没有需要撤回的消息。');wrote=false;undoCount++;},
+};
+const menu=document.getElementById('extensionsMenu');
+const container=document.createElement('div');container.className='extension_container';
+const button=document.createElement('button');button.type='button';button.className='list-group-item wbo-wand-button';
+const icon=document.createElement('i');icon.className='fa-solid fa-magnifying-glass';
+const label=document.createElement('span');label.textContent='请求输入差异（不发出请求）';
+button.append(icon,label);button.onclick=()=>{if(!document.querySelector('.wbo-overlay'))mountRequestDiff(runtime)};
+container.append(button);menu.append(container);
+setInterval(()=>{const overlay=document.querySelector('.wbo-overlay');const clipped=overlay?overlay.firstElementChild.getBoundingClientRect().top<0:false;document.getElementById('checks').textContent=`撤回次数：${undoCount} · 面板顶部被裁切：${clipped?'FAIL':'PASS'}`},400);
+</script></html>
