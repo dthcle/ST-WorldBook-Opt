@@ -1,5 +1,12 @@
 import { compareInputs } from './prompt-diff.js';
 
+/** Compare only when a real previous request exists; otherwise there is nothing to diff. */
+export function buildComparison(previous, current) {
+    if (!previous || !Array.isArray(previous.messages)) return null;
+    if (!current || !Array.isArray(current.messages)) throw new Error('捕获结果缺少消息列表');
+    return compareInputs(previous.messages, current.messages);
+}
+
 function node(tag, text, className) { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (className) n.className = className; return n; }
 function button(text, click) { const n = node('button', text, 'wbo-button'); n.type = 'button'; n.onclick = click; return n; }
 function markedText(text, range) {
@@ -41,8 +48,22 @@ export function mountRequestDiff(runtime, target = document.body) {
             : '当前聊天尚无请求记录。先正常发送一次消息建立基线；不会为建立基线自动调用模型。';
     }
     function render() {
-        if (!diff) return;
+        if (!result) return;
         summary.replaceChildren(); cards.replaceChildren();
+        if (!diff) {
+            // No real request captured yet: list what was captured instead of comparing.
+            summary.append(node('strong', '本次捕获内容（还没有可对比的上一次请求）'));
+            summary.append(node('p', '先正常发送一次消息建立基线，之后再捕获即可看到从头到尾的差异。'));
+            for (const text of result.warnings) summary.append(node('p', text, 'wbo-muted'));
+            result.current.messages.forEach((message, index) => {
+                const card = node('article', undefined, 'wbo-card');
+                card.dataset.messageIndex = String(index);
+                card.append(node('strong', `#${index + 1} · ${message.role ?? '未知角色'}`));
+                card.append(node('pre', typeof message.content === 'string' ? message.content : JSON.stringify(message.content ?? message, null, 2)));
+                cards.append(card);
+            });
+            return;
+        }
         const first = diff.firstDifference;
         summary.append(node('strong', first ? `第一处差异：消息 #${first.index + 1} · ${first.field} · 字段偏移 ${first.characterPosition}` : '消息输入完全相同'));
         summary.append(node('p', `规范化消息 JSON 的相同前缀：${diff.prefixCharacters} 个 UTF-16 单元。上次 ${diff.totalBefore} → 捕获 ${diff.totalAfter}。这不是 token 数量，也不是 API 缓存命中率。`));
@@ -82,10 +103,11 @@ export function mountRequestDiff(runtime, target = document.body) {
         report('正在让酒馆组装提示词，随后会立刻取消请求……');
         try {
             const next = await runtime.captureCurrent();
-            result = next; diff = compareInputs(next.previous.messages, next.current.messages);
+            result = next;
+            diff = buildComparison(next.previous, next.current);
             undoBar.hidden = !next.wroteMessage;
             refreshBaseline(); render();
-            report(next.previous.messages ? '捕获完成，已取消本次 AI 请求。' : '捕获完成，已取消本次 AI 请求；但此前没有真实请求记录，因此只显示本次内容。');
+            report(next.previous ? '捕获完成，已取消本次 AI 请求。' : '捕获完成，已取消本次 AI 请求；此前没有真实请求记录，因此只列出本次捕获内容。');
         } catch (error) {
             result = null; diff = null; summary.replaceChildren(); cards.replaceChildren();
             report(error.message, true);
@@ -103,7 +125,8 @@ export function mountRequestDiff(runtime, target = document.body) {
         capture,
         filter,
         button('跳到第一处差异', () => {
-            const card = cards.querySelector(`[data-message-index="${diff?.firstDifference?.index}"]`);
+            if (!diff?.firstDifference) { report('还没有可跳转的差异。'); return; }
+            const card = cards.querySelector(`[data-message-index="${diff.firstDifference.index}"]`);
             card?.scrollIntoView({ block: 'start' });
             card?.querySelector('mark')?.scrollIntoView({ block: 'center' });
         }),

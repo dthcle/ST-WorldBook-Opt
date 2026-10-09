@@ -1,31 +1,36 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createExactCapture, selectPayload, chatKey } from '../exact-capture.js';
+import { buildComparison } from '../request-diff-ui.js';
 
-function fixture({ api = 'openai', group = null, generating = false, settingsEvent = 'settings_ready' } = {}) {
+function fixture({ api = 'openai', group = null, generating = false, characterId = 0, settingsEvent = 'settings_ready' } = {}) {
     const listeners = new Map();
-    const chat = [{ name: '用户', is_user: true, mes: '你好' }];
+    // Mutable session state, mirroring SillyTavern's module-level variables.
+    const session = { characterId, groupId: group, chatId: 'chat-1', mainApi: api, chat: [{ name: '用户', is_user: true, mes: '你好' }] };
     const stopCalls = [];
-    const ctx = {
-        characterId: 0, groupId: group, chatId: 'chat-1', name1: '用户', mainApi: api, chat,
-        character: '角色', eventTypes: settingsEvent ? { CHAT_COMPLETION_SETTINGS_READY: settingsEvent } : {},
-        eventSource: {
-            on(event, fn) { listeners.set(event, [...(listeners.get(event) ?? []), fn]); },
-            removeListener(event, fn) { listeners.set(event, (listeners.get(event) ?? []).filter(x => x !== fn)); },
-            async emit(event, payload) {
-                for (const fn of listeners.get(event) ?? []) await fn(payload);
-                return true;
-            },
-        },
+    const eventTypes = settingsEvent ? { CHAT_COMPLETION_SETTINGS_READY: settingsEvent } : {};
+    const eventSource = {
+        on(event, fn) { listeners.set(event, [...(listeners.get(event) ?? []), fn]); },
+        removeListener(event, fn) { listeners.set(event, (listeners.get(event) ?? []).filter(x => x !== fn)); },
+        async emit(event, payload) { for (const fn of listeners.get(event) ?? []) await fn(payload); return true; },
+    };
+    // getContext() returns a fresh snapshot object on every call, exactly like SillyTavern.
+    const getContext = () => ({
+        characterId: session.characterId,
+        groupId: session.groupId,
+        chatId: session.chatId,
+        name1: '用户',
+        mainApi: session.mainApi,
+        chat: session.chat,
+        eventTypes,
+        eventSource,
         generate(type) {
             assert.equal(type, 'normal');
             if (generating) return Promise.reject(new Error('busy'));
-            // Emulate SillyTavern asynchronously: the pipeline pushes the user message,
-            // emits the settings event, then (already aborted) fails to fetch.
             return new Promise((resolve, reject) => {
                 setTimeout(() => {
-                    chat.push({ name: '用户', is_user: true, mes: '去海边' });
-                    ctx.eventSource.emit(settingsEvent, {
+                    session.chat.push({ name: '用户', is_user: true, mes: '去海边' });
+                    eventSource.emit(settingsEvent, {
                         model: 'mock-model', chat_completion_source: 'custom',
                         messages: [
                             { role: 'system', content: '世界设定' },
@@ -36,16 +41,16 @@ function fixture({ api = 'openai', group = null, generating = false, settingsEve
                 }, 0);
             });
         },
-        async deleteLastMessage() { chat.pop(); },
-    };
+        async deleteLastMessage() { session.chat.pop(); },
+    });
     const runtime = createExactCapture({
-        getContext: () => ctx,
+        getContext,
         isGenerating: () => generating,
         stopGeneration: () => { stopCalls.push(Date.now()); return true; },
         timeoutMs: 200,
         now: () => '2026-01-01T00:00:00.000Z',
     });
-    return { ctx, runtime, chat, stopCalls, listeners };
+    return { session, runtime, stopCalls, listeners, getContext };
 }
 
 test('selectPayload keeps only comparable fields and drops credentials', () => {
@@ -66,9 +71,30 @@ test('chatKey separates chats so a stale baseline is not reused', () => {
     assert.notEqual(chatKey(ctx), chatKey({ ...ctx, chatId: 'b' }));
 });
 
+test('context is re-read per call, so a chat opened after install still works', async () => {
+    // Regression: getContext() snapshots are frozen at page load, when no chat is open.
+    const { runtime, session } = fixture({ characterId: null });
+    session.chat = [];
+    await assert.rejects(runtime.captureCurrent(), /还没有打开角色聊天/);
+    // The user now opens a single-character chat.
+    session.characterId = 0;
+    session.chat = [{ name: '用户', is_user: true, mes: '你好' }];
+    const result = await runtime.captureCurrent();
+    assert.equal(result.previous, null);
+    assert.equal(result.current.messages.at(-1).content, '去海边');
+});
+
+test('baseline captured before a chat switch is not attributed to the new chat', async () => {
+    const { runtime, session, getContext } = fixture();
+    await getContext().eventSource.emit('settings_ready', { model: 'm', messages: [{ role: 'user', content: 'a' }] });
+    assert.ok(runtime.getLast());
+    session.chatId = 'chat-2';
+    assert.equal(runtime.getLast(), null);
+});
+
 test('real generation stores the baseline without aborting', async () => {
-    const { runtime, ctx, stopCalls } = fixture();
-    await ctx.eventSource.emit('settings_ready', { model: 'm', chat_completion_source: 'c', messages: [{ role: 'user', content: 'hi' }] });
+    const { runtime, getContext, stopCalls } = fixture();
+    await getContext().eventSource.emit('settings_ready', { model: 'm', chat_completion_source: 'c', messages: [{ role: 'user', content: 'hi' }] });
     assert.equal(stopCalls.length, 0, 'a real request must not be aborted');
     const last = runtime.getLast();
     assert.equal(last.model, 'm');
@@ -87,8 +113,8 @@ test('capture aborts synchronously at the settings event and returns that payloa
 });
 
 test('capture does not overwrite the previous real baseline', async () => {
-    const { runtime, ctx } = fixture();
-    await ctx.eventSource.emit('settings_ready', { model: 'm', chat_completion_source: 'c', messages: [{ role: 'user', content: '真实' }] });
+    const { runtime, getContext } = fixture();
+    await getContext().eventSource.emit('settings_ready', { model: 'm', chat_completion_source: 'c', messages: [{ role: 'user', content: '真实' }] });
     const result = await runtime.captureCurrent();
     assert.equal(result.previous.messages.at(-1).content, '真实');
     assert.equal(result.current.messages.at(-1).content, '去海边');
@@ -96,23 +122,23 @@ test('capture does not overwrite the previous real baseline', async () => {
 });
 
 test('capture reports the added chat message and can undo it', async () => {
-    const { runtime, chat } = fixture();
-    const lengthBefore = chat.length;
+    const { runtime, session } = fixture();
+    const lengthBefore = session.chat.length;
     await runtime.captureCurrent();
-    assert.equal(chat.length, lengthBefore + 1);
+    assert.equal(session.chat.length, lengthBefore + 1);
     assert.equal(runtime.wroteChatMessage(), true);
     await runtime.undoWrittenMessage();
-    assert.equal(chat.length, lengthBefore);
+    assert.equal(session.chat.length, lengthBefore);
     assert.equal(runtime.wroteChatMessage(), false);
     await assert.rejects(runtime.undoWrittenMessage(), /没有需要撤回的消息/);
 });
 
 test('undo refuses when the last message is not ours', async () => {
-    const { runtime, chat, ctx } = fixture();
+    const { runtime, session } = fixture();
     await runtime.captureCurrent();
-    chat.push({ name: '角色', is_user: false, mes: 'AI 回复' });
+    session.chat.push({ name: '角色', is_user: false, mes: 'AI 回复' });
     await assert.rejects(runtime.undoWrittenMessage(), /聊天已变化/);
-    assert.equal(ctx.chat.length, 3);
+    assert.equal(session.chat.length, 3);
 });
 
 test('abort rejection from generate is swallowed', async () => {
@@ -147,40 +173,58 @@ test('group chats are refused', async () => {
 });
 
 test('missing capture event fails fast at construction', () => {
-    const { ctx } = fixture();
+    const { getContext } = fixture();
+    const ctx = getContext();
     assert.throws(() => createExactCapture({ getContext: () => ({ ...ctx, eventTypes: {} }), stopGeneration: () => {} }), /缺少请求捕获事件/);
     assert.throws(() => createExactCapture({ getContext: () => ctx }), /缺少取消生成接口/);
 });
 
 test('timeout rejects when the pipeline never reports a payload', async () => {
     const listeners = new Map();
-    const ctx = { characterId: 0, groupId: null, chatId: 'c', chat: [], mainApi: 'openai', eventTypes: { CHAT_COMPLETION_SETTINGS_READY: 'ready' }, eventSource: { on: (e, f) => listeners.set(e, f), removeListener() {}, emit: async () => true }, generate: () => new Promise(() => {}) };
-    const runtime = createExactCapture({ getContext: () => ctx, stopGeneration: () => {}, timeoutMs: 30 });
+    const getContext = () => ({
+        characterId: 0, groupId: null, chatId: 'c', chat: [], mainApi: 'openai',
+        eventTypes: { CHAT_COMPLETION_SETTINGS_READY: 'ready' },
+        eventSource: { on: (e, f) => listeners.set(e, f), removeListener() {}, emit: async () => true },
+        generate: () => new Promise(() => {}),
+    });
+    const runtime = createExactCapture({ getContext, stopGeneration: () => {}, timeoutMs: 30 });
     await assert.rejects(runtime.captureCurrent(), /超时/);
 });
 
-test('stale baseline from another chat is not returned', async () => {
-    const { runtime, ctx } = fixture();
-    await ctx.eventSource.emit('settings_ready', { model: 'm', messages: [{ role: 'user', content: 'a' }] });
-    ctx.chatId = 'other-chat';
-    assert.equal(runtime.getLast(), null);
-});
-
 test('destroy removes the listener and clears state', async () => {
-    const { runtime, ctx, listeners } = fixture();
-    await ctx.eventSource.emit('settings_ready', { model: 'm', messages: [{ role: 'user', content: 'a' }] });
+    const { runtime, getContext, listeners } = fixture();
+    await getContext().eventSource.emit('settings_ready', { model: 'm', messages: [{ role: 'user', content: 'a' }] });
     runtime.destroy();
     assert.equal((listeners.get('settings_ready') ?? []).length, 0);
     assert.equal(runtime.getLast(), null);
-    await ctx.eventSource.emit('settings_ready', { model: 'm', messages: [{ role: 'user', content: 'b' }] });
+    await getContext().eventSource.emit('settings_ready', { model: 'm', messages: [{ role: 'user', content: 'b' }] });
     assert.equal(runtime.getLast(), null);
     await assert.rejects(runtime.captureCurrent(), /已销毁/);
 });
 
 test('malformed payload during capture rejects instead of resolving empty', async () => {
-    const { runtime, ctx } = fixture();
+    const { runtime, getContext } = fixture();
     const capture = runtime.captureCurrent();
-    const pending = ctx.eventSource.emit('settings_ready', { model: 'm' });
-    await pending;
+    await getContext().eventSource.emit('settings_ready', { model: 'm' });
     await assert.rejects(capture, /消息列表/);
+});
+
+test('buildComparison returns null without a previous request instead of throwing', () => {
+    const current = { messages: [{ role: 'user', content: 'hi' }] };
+    assert.equal(buildComparison(null, current), null);
+    assert.equal(buildComparison(undefined, current), null);
+    assert.equal(buildComparison({}, current), null);
+    assert.equal(buildComparison({ messages: null }, current), null);
+});
+
+test('buildComparison compares matching payloads from the first message', () => {
+    const previous = { messages: [{ role: 'system', content: 'A' }, { role: 'user', content: 'one' }] };
+    const current = { messages: [{ role: 'system', content: 'A' }, { role: 'user', content: 'two' }] };
+    const diff = buildComparison(previous, current);
+    assert.equal(diff.firstDifference.index, 1);
+    assert.equal(diff.rows.length, 2);
+});
+
+test('buildComparison rejects a current payload without messages', () => {
+    assert.throws(() => buildComparison({ messages: [] }, { model: 'm' }), /缺少消息列表/);
 });

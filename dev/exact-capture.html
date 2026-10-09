@@ -27,10 +27,11 @@ const current={model:'mock-model',source:'custom',key:'k',messages:[
   {role:'user',content:'去海边寻找灯塔'},
 ]};
 let wrote=false, undoCount=0;
+const query=new URLSearchParams(location.search);
 const runtime={
-  getLast:()=>structuredClone(previous),
+  getLast:()=>query.has('nobaseline')?null:structuredClone(previous),
   clear(){},
-  async captureCurrent(){wrote=true;return {previous:structuredClone(previous),current:{...current,capturedAt:new Date().toISOString()},wroteMessage:true,warnings:['这是基于酒馆“提示词查看器”的精确捕获：输入框内容已作为一条用户消息写入聊天，随后取消了 AI 请求。','提示词后处理发生在后端，浏览器无法看到。','字符前缀不代表 token 前缀或真实 API 缓存命中率。']}},
+  async captureCurrent(){wrote=true;return {previous:query.has('nobaseline')?null:structuredClone(previous),current:{...current,capturedAt:new Date().toISOString()},wroteMessage:true,warnings:['这是与酒馆“提示词查看器”相同的精确捕获：输入框内容已作为一条用户消息写入聊天，随后取消了 AI 请求。','提示词后处理发生在后端，浏览器无法看到。','字符前缀不代表 token 前缀或真实 API 缓存命中率。']}},
   async undoWrittenMessage(){if(!wrote)throw new Error('没有需要撤回的消息。');wrote=false;undoCount++;},
 };
 const menu=document.getElementById('extensionsMenu');
