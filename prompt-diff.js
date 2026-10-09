@@ -1,11 +1,12 @@
+import { diffLines } from './line-diff.js';
+
 /** Ordered, structural input comparison; NOT a tokenizer or provider cache metric.
  * All lengths/offsets are JavaScript UTF-16 code units (including surrogate halves).
  * Messages use sorted-key canonical JSON followed by '\n', in original array order.
  * Plain text is compared verbatim. Unlike JSON content strings, displayed field
  * strings are NOT quoted or escaped. Inputs must both be strings or both arrays.
  */
-const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
-const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value)
     && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 
 // Iterative serialization avoids recursion limits. No toJSON, getters, coercion,
@@ -64,6 +65,7 @@ function fieldDiff(field, beforeText, afterText, beforePresent = true, afterPres
         field, beforeText, afterText, beforePresent, afterPresent, commonPrefix, commonSuffix,
         beforeChanged: { start: commonPrefix, end: a.length - commonSuffix },
         afterChanged: { start: commonPrefix, end: b.length - commonSuffix },
+        lineDiff: diffLines(a, b),
     };
 }
 function prepare(messages) {

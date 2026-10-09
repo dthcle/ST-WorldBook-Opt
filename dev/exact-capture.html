@@ -16,12 +16,12 @@ import {mountRequestDiff} from '../request-diff-ui.js';
 if(new URL(location.href).searchParams.has('compact'))document.body.classList.add('compact');
 const previous={model:'mock-model',source:'custom',key:'k',sentAt:new Date(Date.now()-60000).toISOString(),messages:[
   {role:'system',content:'世界设定：现代城市。'},
-  {role:'user',content:'广场位于城市中心，人群熙攘。'},
+  {role:'user',content:'§§TH_SQUASH_WI:367b4ee86e384bcdaee791d3c09177c2:START§§\n<status_current_variable>\n世界:\n  年: 待设定\n时间: 2026年3月29日 21:40\n温度: -32℃\n灾难爆发: 还剩4天\n最新新闻: 本市自3月30日起实行生活物资配给。\n§§TH_SQUASH_WI:367b4ee86e384bcdaee791d3c09177c2:END§§'},
   {role:'user',content:'你好'},
 ]};
 const current={model:'mock-model',source:'custom',key:'k',messages:[
   {role:'system',content:'世界设定：现代城市。'},
-  {role:'user',content:'灯塔位于海港东侧，浪声不断。'},
+  {role:'user',content:'§§TH_SQUASH_WI:30c0bb5f457545bfa1fd97244e2e8b232:START§§\n<status_current_variable>\n世界:\n  年: 待设定\n时间: 2026年3月30日 21:40\n温度: -33℃\n灾难爆发: 还剩3天\n最新新闻: 本市自3月30日起实行生活物资配给。\n§§TH_SQUASH_WI:30c0bb5f457545bfa1fd97244e2e8b232:END§§'},
   {role:'user',content:'你好'},
   {role:'assistant',content:'你好，想去哪里？'},
   {role:'user',content:'去海边寻找灯塔'},

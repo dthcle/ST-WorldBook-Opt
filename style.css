@@ -49,6 +49,20 @@
 .wbo-request-panel .wbo-diff-mark{background:#b55f2b88;color:inherit;border-bottom:1px solid #e9ad69}
 .wbo-request-panel .wbo-card{scroll-margin-top:12px}
 .wbo-request-panel .wbo-request-text{min-width:0;tab-size:4}
+/* Unified line diff: one row per changed line, '-' before / '+' after. */
+.wbo-lines{margin:8px 0;border:1px solid var(--SmartThemeBorderColor,#3d4654);border-radius:8px;overflow:hidden;background:#0002}
+.wbo-line{display:grid;grid-template-columns:3.2em 1.4em minmax(0,1fr);align-items:start;gap:6px;padding:1px 8px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px;line-height:1.55}
+.wbo-line-no{opacity:.45;text-align:right;user-select:none}
+.wbo-line-sign{opacity:.7;user-select:none;text-align:center}
+.wbo-line-text,.wbo-line pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;background:none;padding:0;max-height:none;overflow:visible;font:inherit}
+.wbo-line-del{background:#7d2b2b4d}
+.wbo-line-del .wbo-line-sign{color:#ff9a9a;opacity:1}
+.wbo-line-add{background:#2b6b4a4d}
+.wbo-line-add .wbo-line-sign{color:#8ee0b0;opacity:1}
+.wbo-line-equal{opacity:.5}
+.wbo-lines-wide .wbo-line{grid-template-columns:3.2em 1.4em minmax(0,1fr)}
+.wbo-lines-toggle{display:inline-flex;align-items:center;gap:6px;font-size:13px;white-space:nowrap}
+.wbo-lines-toggle input[type="checkbox"]{flex:0 0 16px;width:16px;min-width:16px;height:16px;margin:0}
 @media(max-width:600px){.wbo-overlay{padding:8px;padding-top:calc(8px + env(safe-area-inset-top,0px));padding-bottom:calc(8px + env(safe-area-inset-bottom,0px))}
 .wbo-panel{padding:14px;border-radius:12px}
 .wbo-diff{grid-template-columns:1fr}
