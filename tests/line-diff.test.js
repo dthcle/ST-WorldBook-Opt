@@ -31,7 +31,10 @@ test('diffLines reports which lines changed with intra-line ranges', () => {
     const diff = diffLines(before, after);
     assert.equal(diff.supported, true);
     assert.equal(diff.beforeLineCount, 3);
-    assert.equal(diff.changedLineCount, 1);
+    assert.equal(diff.changedLineCount, 2, 'one replacement is a deletion plus an insertion');
+    assert.equal(diff.deleteCount, 1);
+    assert.equal(diff.insertCount, 1);
+    assert.equal(diff.replaceCount, 1);
     const changed = diff.rows.filter(r => r.type === 'change');
     assert.equal(changed.length, 1);
     assert.equal(changed[0].beforeText, '温度：-32℃');
@@ -55,7 +58,7 @@ test('diffLines does not flag a wrapper id line as the whole block', () => {
     const before = ['§§TH_SQUASH_WI:aaa:START§§', ...body, '§§TH_SQUASH_WI:aaa:END§§'].join('\n');
     const after = ['§§TH_SQUASH_WI:bbb:START§§', ...body, '§§TH_SQUASH_WI:bbb:END§§'].join('\n');
     const diff = diffLines(before, after);
-    assert.equal(diff.changedLineCount, 2, 'only the two marker lines changed');
+    assert.equal(diff.changedLineCount, 4, 'two marker replacements: two deletions + two insertions');
     assert.equal(diff.rows.filter(r => r.type === 'equal').length, 200);
 });
 
@@ -114,5 +117,106 @@ test('patience alignment keeps a stable tail aligned across a large insertion', 
     const diff = diffLines(before, after);
     assert.equal(diff.rows.filter(r => r.type === 'equal').length, 301, 'head + 300 stable lines stay equal');
     assert.equal(diff.changedLineCount, 400);
+});
+
+function assertCoverage(a, b, rows) {
+    assert.deepEqual(rows.filter(r => r.beforeIndex !== null).map(r => r.beforeIndex), a.map((_, i) => i));
+    assert.deepEqual(rows.filter(r => r.afterIndex !== null).map(r => r.afterIndex), b.map((_, i) => i));
+    for (const row of rows) {
+        if (row.type === 'equal') assert.equal(a[row.beforeIndex], b[row.afterIndex]);
+        if (row.type === 'change') assert.notEqual(a[row.beforeIndex], b[row.afterIndex]);
+    }
+}
+
+// Tiny test-only oracle, never used by the production alignment.
+function lcsLength(a, b) {
+    let previous = new Array(b.length + 1).fill(0);
+    for (const line of a) {
+        const current = [0];
+        for (let j = 0; j < b.length; j++) current.push(line === b[j]
+            ? previous[j] + 1 : Math.max(previous[j + 1], current[j]));
+        previous = current;
+    }
+    return previous[b.length];
+}
+
+test('Myers fallback retains repeated equal lines inside an unanchored replacement', () => {
+    const a = ['old head', 'repeat', '', 'repeat', '', 'old tail'];
+    const b = ['new head', '', 'repeat', '', 'repeat', 'new tail'];
+    const rows = alignLines(a, b);
+    assertCoverage(a, b, rows);
+    assert.equal(rows.filter(r => r.type === 'equal').length, lcsLength(a, b));
+});
+
+test('range-local patience can reuse lines which are globally repeated without fallback', () => {
+    const a = ['head', 'old', 'u', 'v', 'anchor', 'u', 'v', 'end old'];
+    const b = ['head', 'new', 'v', 'u', 'anchor', 'u', 'v', 'end new'];
+    const stats = {};
+    const rows = alignLines(a, b, { maxFallbackWork: 0, stats });
+    assertCoverage(a, b, rows);
+    assert.equal(rows.filter(r => r.type === 'equal').length, 5);
+    // u/v become unique only in the subrange preceding anchor. Global counts would
+    // send that subrange to fallback and exhaust the deliberately zero budget.
+    assert.equal(stats.budgetExceeded, false);
+});
+
+test('public synthetic large-prefix regression preserves repeated body: 31 deletes, 883 inserts', () => {
+    // Generated generic content only: private prompt text must never become a fixture.
+    const prefix = Array.from({ length: 7201 }, (_, i) => `public stable prefix ${i}`);
+    const body = Array.from({ length: 60 }, () => 'public repeated body');
+    const a = [...prefix, 'old first', ...body, ...Array.from({ length: 30 }, (_, i) => `old ${i}`)];
+    const b = [...prefix, 'new first', ...Array.from({ length: 400 }, (_, i) => `new prefix ${i}`),
+        ...body, ...Array.from({ length: 482 }, (_, i) => `new suffix ${i}`)];
+    const diff = diffLines(a.join('\n'), b.join('\n'));
+    assertCoverage(a, b, diff.rows);
+    assert.equal(diff.deleteCount, 31);
+    assert.equal(diff.insertCount, 883);
+    assert.equal(diff.changedLineCount, 914);
+    assert.equal(diff.matched, prefix.length + body.length);
+    assert.equal(diff.hunks[0].beforeStart, 7202);
+    assert.equal(diff.budgetExceeded, false);
+});
+
+test('budget exhaustion uses bounded matching without losing coverage or lying about exactness', () => {
+    const a = ['old', ...Array(50).fill('repeat'), 'old end'];
+    const b = ['new', ...Array(50).fill('repeat'), 'new end'];
+    for (const limits of [{ maxFallbackWork: 0 }, { maxTraceCells: 0 }]) {
+        const stats = {};
+        const rows = alignLines(a, b, { ...limits, stats });
+        assertCoverage(a, b, rows);
+        assert.equal(stats.budgetExceeded, true);
+        assert.equal(rows.filter(r => r.type === 'equal').length, 50);
+    }
+    const diff = diffLines(a.join('\n'), b.join('\n'));
+    assert.equal(diff.minimalGuaranteed, false);
+    assert.equal(diff.changedLineCount, diff.deleteCount + diff.insertCount);
+    assert.equal(diff.matched + diff.deleteCount, diff.beforeLineCount);
+    assert.equal(diff.matched + diff.insertCount, diff.afterLineCount);
+});
+
+test('unanchored small repeated sequences agree with an LCS oracle and cover every index', () => {
+    let seed = 12345, checked = 0;
+    const random = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0);
+    for (let trial = 0; trial < 500; trial++) {
+        const a = Array.from({ length: 6 + random() % 10 }, () => String(random() % 3));
+        const b = Array.from({ length: 6 + random() % 10 }, () => String(random() % 3));
+        // Disjoint outer markers prevent common-end trimming; repeated alphabet prevents anchors.
+        if (['0', '1', '2'].some(line => a.filter(x => x === line).length < 2 || b.filter(x => x === line).length < 2)) continue;
+        a.unshift('old head'); a.push('old tail');
+        b.unshift('new head'); b.push('new tail');
+        const rows = alignLines(a, b);
+        assertCoverage(a, b, rows);
+        assert.equal(rows.filter(r => r.type === 'equal').length, lcsLength(a, b));
+        checked++;
+    }
+    assert.ok(checked > 100);
+});
+
+test('patience anchors are deliberately not advertised as globally minimal', () => {
+    const a = ['A', 'x', 'x', 'x', 'B'], b = ['B', 'x', 'x', 'x', 'A'];
+    const diff = diffLines(a.join('\n'), b.join('\n'));
+    assertCoverage(a, b, diff.rows);
+    assert.equal(diff.minimalGuaranteed, false);
+    assert.ok(diff.matched < lcsLength(a, b), 'unique anchor can sacrifice a longer repeated subsequence');
 });
 

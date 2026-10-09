@@ -1,45 +1,32 @@
 <!doctype html>
 <html lang="zh-CN" data-wbo-preview><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>请求输入差异 · 精确捕获测试</title><link rel="stylesheet" href="../style.css">
-<style>
-body{background:#111723;color:#e4e8f0;font:16px system-ui;margin:24px}
-button,.menu_button{background:#252c3c;color:inherit}
-#extensionsMenu{max-width:400px;border:1px solid #445;margin:16px 0}
-body.compact{width:360px;max-width:calc(100vw - 16px);margin:8px}
-</style>
-<h1>请求输入差异 · 模拟环境</h1>
-<p>用假的捕获运行时验证界面与移动端布局，不连接酒馆、不发出任何请求。</p>
-<div id="extensionsMenu"></div>
-<p id="checks" role="status"></p>
+<title>请求诊断：最终传输与晚处理回归</title><link rel="stylesheet" href="../style.css">
+<style>body{background:#111723;color:#e4e8f0;font:16px system-ui;margin:24px}#extensionsMenu{max-width:400px;border:1px solid #445;margin:16px 0}textarea{width:min(700px,100%);height:80px;background:#222c3b;color:inherit}#checks{font-size:13px}body.compact{max-width:360px;margin:8px}</style>
+<h1>最终发送边界回归（内存模拟）</h1><p>先组装6条临时消息，后注册的插件再清理、合并为2条。仅计数假的传输，不访问模型接口。</p>
+<label for="send_textarea">当前输入（未发送）</label><br><textarea id="send_textarea">去海边寻找灯塔</textarea>
+<div id="extensionsMenu"></div><p id="checks" role="status"></p><button id="actual">模拟正常发送建立基线</button>
 <script type="module">
-import {mountRequestDiff} from '../request-diff-ui.js';
-if(new URL(location.href).searchParams.has('compact'))document.body.classList.add('compact');
-const previous={model:'mock-model',source:'custom',key:'k',sentAt:new Date(Date.now()-60000).toISOString(),messages:[
-  {role:'system',content:'世界设定：现代城市。'},
-  {role:'user',content:'§§TH_SQUASH_WI:367b4ee86e384bcdaee791d3c09177c2:START§§\n<status_current_variable>\n世界:\n  年: 待设定\n时间: 2026年3月29日 21:40\n温度: -32℃\n灾难爆发: 还剩4天\n最新新闻: 本市自3月30日起实行生活物资配给。\n§§TH_SQUASH_WI:367b4ee86e384bcdaee791d3c09177c2:END§§'},
-  {role:'user',content:'你好'},
-]};
-const current={model:'mock-model',source:'custom',key:'k',messages:[
-  {role:'system',content:'世界设定：现代城市。'},
-  {role:'user',content:'§§TH_SQUASH_WI:30c0bb5f457545bfa1fd97244e2e8b232:START§§\n<status_current_variable>\n世界:\n  年: 待设定\n时间: 2026年3月30日 21:40\n温度: -33℃\n灾难爆发: 还剩3天\n最新新闻: 本市自3月30日起实行生活物资配给。\n§§TH_SQUASH_WI:30c0bb5f457545bfa1fd97244e2e8b232:END§§'},
-  {role:'user',content:'你好'},
-  {role:'assistant',content:'你好，想去哪里？'},
-  {role:'user',content:'去海边寻找灯塔'},
-]};
-let wrote=false, undoCount=0;
-const query=new URLSearchParams(location.search);
-const runtime={
-  getLast:()=>query.has('nobaseline')?null:structuredClone(previous),
-  clear(){},
-  async captureCurrent(){wrote=true;return {previous:query.has('nobaseline')?null:structuredClone(previous),current:{...current,capturedAt:new Date().toISOString()},wroteMessage:true,warnings:['这是与酒馆“提示词查看器”相同的精确捕获：输入框内容已作为一条用户消息写入聊天，随后取消了 AI 请求。','提示词后处理发生在后端，浏览器无法看到。','字符前缀不代表 token 前缀或真实 API 缓存命中率。']}},
-  async undoWrittenMessage(){if(!wrote)throw new Error('没有需要撤回的消息。');wrote=false;undoCount++;},
-};
-const menu=document.getElementById('extensionsMenu');
-const container=document.createElement('div');container.className='extension_container';
-const button=document.createElement('button');button.type='button';button.className='list-group-item wbo-wand-button';
-const icon=document.createElement('i');icon.className='fa-solid fa-magnifying-glass';
-const label=document.createElement('span');label.textContent='请求输入差异（不发出请求）';
-button.append(icon,label);button.onclick=()=>{if(!document.querySelector('.wbo-overlay'))mountRequestDiff(runtime)};
-container.append(button);menu.append(container);
-setInterval(()=>{const overlay=document.querySelector('.wbo-overlay');const clipped=overlay?overlay.firstElementChild.getBoundingClientRect().top<0:false;document.getElementById('checks').textContent=`撤回次数：${undoCount} · 面板顶部被裁切：${clipped?'FAIL':'PASS'}`},400);
+import {createExactCapture} from '../exact-capture.js';
+import {initDiagnostics} from '../index.js';
+const query=new URLSearchParams(location.search);if(query.has('compact'))document.body.classList.add('compact');
+let delegated=0,stopped=0,phase='idle',cleaned=false;
+const hooks=[];
+const source={on(e,f){hooks.push(f)},async emit(body){for(const hook of hooks)await hook(body)}};
+const host={location:{origin:location.origin},async fetch(url,opts){delegated++;return new Response('{}',{status:200})}};
+const state={characterId:null,chatId:null,groupId:null,chat:[]};
+const ctx=()=>({...state,mainApi:'openai',name1:'用户',eventSource:source,eventTypes:{CHAT_COMPLETION_SETTINGS_READY:'ready'},
+ async generate(type,options={}){phase='assembling';cleaned=false;const area=document.getElementById('send_textarea'),text=area.value;area.value='';state.chat.push({name:'用户',is_user:true,mes:text,send_date:'mock'});
+ const packet={type:'normal',model:'mock-model',chat_completion_source:'custom',messages:[{role:'system',content:'固定系统规则。'},...Array.from({length:5},(_,i)=>({role:'user',content:`§§TH_SQUASH_WI:temporary-${i}:START§§`}))]};
+ await source.emit(packet);try{await host.fetch('/api/backends/chat-completions/generate',{method:'POST',body:JSON.stringify(packet),signal:options.signal})}finally{phase='idle';cleaned=true}},
+ async deleteMessage(index,swipe,confirm,toolCalls){if(index!==state.chat.length-1)throw Error('bad delete index');state.chat.splice(index,1)} });
+const runtime=createExactCapture({host,getContext:ctx,isGenerating:()=>phase!=='idle',stopGeneration:()=>{stopped++},getInput:()=>document.getElementById('send_textarea').value});
+// Registered after diagnostics, just like the audited source's makeLast handler.
+source.on('ready',packet=>{const history=state.chat.map(m=>`用户：${m.mes}`).join('\n');packet.messages.splice(0,packet.messages.length,{role:'system',content:'固定系统规则。'},{role:'user',content:'稳定设定与历史\n'+history})});
+// Context initially empty at installation; opening a chat later must still work.
+state.characterId=0;state.chatId='mock-chat';
+async function actual(){try{await ctx().generate('normal');document.getElementById('send_textarea').value='去海边寻找灯塔'}catch(error){console.error(error)}}
+if(!query.has('nobaseline')){document.getElementById('send_textarea').value='你好';await actual()}
+await initDiagnostics(async()=>runtime);document.getElementById('actual').onclick=actual;
+function report(){const last=runtime.getLast();document.getElementById('checks').textContent=`传输调用 ${delegated}（预览不应增加） · 停止请求 ${stopped} · 流程清理 ${cleaned?'PASS':'idle'} · 基线 ${last?.messages.length??0} 条 · 基线含临时标记 ${JSON.stringify(last??{}).includes('TH_SQUASH_WI')?'FAIL':'NO'} · 当前聊天 ${state.chat.length} 条`}
+setInterval(report,300);report();
 </script></html>

@@ -47,14 +47,13 @@ async function init() {
     if (document.getElementById('wbo-open')) return;
     const container = document.getElementById('extensions_settings2') ?? document.getElementById('extensions_settings');
     if (!container) { console.warn('[WorldBook Opt] 扩展设置区域不存在'); return; }
-    let diffRuntime = null;
     const drawer = buildSettingsDrawer([
         { label: '打开世界书优化器', id: 'wbo-open', run: openOptimizer },
         {
             label: '请求输入差异',
             run: async () => {
                 if (document.querySelector('.wbo-overlay')) return;
-                try { diffRuntime ??= await installExactCapture(); mountRequestDiff(diffRuntime); }
+                try { const runtime = await initDiagnostics(); if (!document.querySelector('.wbo-overlay')) mountRequestDiff(runtime); }
                 catch (error) { console.error('[WorldBook Opt]', error); globalThis.toastr?.error(error.message, '请求输入差异'); }
             },
         },
@@ -66,7 +65,8 @@ async function init() {
 /** Wand (magic wand) menu entry. */
 export async function initDiagnostics(factory = installExactCapture) {
     if (initDiagnostics.runtime) return initDiagnostics.runtime;
-    const runtime = await factory();
+    if (!initDiagnostics.promise) initDiagnostics.promise = Promise.resolve().then(factory).catch(error => { initDiagnostics.promise = null; throw error; });
+    const runtime = await initDiagnostics.promise;
     initDiagnostics.runtime = runtime;
     function mountWand() {
         const menu = document.getElementById('extensionsMenu');

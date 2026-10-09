@@ -2,8 +2,8 @@ import { compareInputs } from './prompt-diff.js';
 
 /** Compare only when a real previous request exists; otherwise there is nothing to diff. */
 export function buildComparison(previous, current) {
-    if (!previous || !Array.isArray(previous.messages)) return null;
     if (!current || !Array.isArray(current.messages)) throw new Error('捕获结果缺少消息列表');
+    if (!previous || !Array.isArray(previous.messages)) return null;
     return compareInputs(previous.messages, current.messages);
 }
 
@@ -36,7 +36,8 @@ function lineRows(lines, field, showEqual = false) {
     }
     const visible = all.map((row, index) => ({ row, index })).filter(item => keep.has(item.index));
     const container = node('div', undefined, 'wbo-lines');
-    container.append(node('p', `逐行差异：上次 ${lines.beforeLineCount} 行 → 捕获 ${lines.afterLineCount} 行，其中变化 ${lines.changedLineCount} 行，集中在 ${lines.hunks.length} 个区段。字符偏移不是 token 数。`, 'wbo-muted'));
+    container.append(node('p', `逐行差异：上次 ${lines.beforeLineCount} 行 → 捕获 ${lines.afterLineCount} 行；删除 ${lines.deleteCount} 行、新增 ${lines.insertCount} 行，相同行 ${lines.matched} 行。替换按删除+新增统计，区段只是展示对齐，不是唯一标准答案。`, 'wbo-muted'));
+    if (lines.budgetExceeded) container.append(node('p', '文本对齐预算已耗尽，部分区段使用近似对齐；不要把展示行数当作最小编辑距离。', 'wbo-warning'));
     if (lines.hunks.length) {
         const ranges = lines.hunks.slice(0, 6).map(hunk => {
             const before = hunk.beforeStart === null ? '—' : `${hunk.beforeStart}–${hunk.beforeEnd}`;
@@ -49,11 +50,10 @@ function lineRows(lines, field, showEqual = false) {
     const useTwoColumns = all.some(row => (row.beforeText ?? row.afterText ?? '').length > 400);
     container.classList.toggle('wbo-lines-wide', useTwoColumns);
     let rendered = 0;
-    for (const { row } of visible) {
-        if (rendered++ >= MAX_RENDERED_LINES) {
-            container.append(node('p', '差异行过多，已截断显示；请用“仅差异消息”过滤或直接查看完整正文。', 'wbo-warning'));
-            break;
-        }
+    const appendPage = () => {
+    const end = Math.min(rendered + MAX_RENDERED_LINES, visible.length);
+    for (; rendered < end; rendered++) {
+        const { row } = visible[rendered];
         if (row.type === 'equal') {
             const line = node('div', undefined, 'wbo-line wbo-line-equal');
             line.append(node('span', String(row.beforeIndex + 1), 'wbo-line-no'), node('span', ' ', 'wbo-line-sign'), node('pre', row.beforeText, 'wbo-line-text'));
@@ -75,6 +75,12 @@ function lineRows(lines, field, showEqual = false) {
             emit('+', row.afterIndex, row.afterText, null, 'wbo-line-add');
         }
     }
+    if (rendered < visible.length) {
+        const more = button(`加载后续行（尚余 ${visible.length - rendered} 行）`, () => { more.remove(); appendPage(); });
+        container.append(more);
+    }
+    };
+    appendPage();
     if (!visible.length) container.append(node('p', '没有逐行差异（仅字符级差异）。'));
     return container;
 }
@@ -98,8 +104,8 @@ export function mountRequestDiff(runtime, target = document.body) {
 
     const header = node('header');
     header.append(node('h2', '请求输入差异'), button('关闭', close));
-    const intro = node('p', '把输入框内容真正走一遍酒馆的组装流程，在发请求前拦下提示词，再与上一次真实请求对比。不会发出 API 请求，也不会产生费用。', 'wbo-muted');
-    const warning = node('p', '与酒馆“提示词查看器”原理相同：输入框内容会被写入聊天作为一条用户消息（相当于点了发送），随后取消 AI 请求。捕获后可在下方撤回该消息。', 'wbo-warning');
+    const intro = node('p', '上次酒馆后端成功响应的实际请求，与当前输入组装后的最终 fetch 正文对比。预览请求在转发前截断，不只是依赖停止按钮。', 'wbo-muted');
+    const warning = node('p', '仅支持标准浏览器 Chat Completion fetch 通道。组装会运行宏/插件，并可能将输入保存为用户消息，不是无副作用模拟；撤回不能回滚宏或插件状态。预览期间不要发送或切换聊天。', 'wbo-warning');
     const baseline = node('p', undefined, 'wbo-muted');
     const status = node('p', undefined, 'wbo-status'); status.setAttribute('role', 'status');
     const toolbar = node('div', undefined, 'wbo-toolbar');
@@ -137,8 +143,11 @@ export function mountRequestDiff(runtime, target = document.body) {
             return;
         }
         const first = diff.firstDifference;
-        summary.append(node('strong', first ? `第一处差异：消息 #${first.index + 1} · ${first.field} · 字段偏移 ${first.characterPosition}` : '消息输入完全相同'));
-        summary.append(node('p', `规范化消息 JSON 的相同前缀：${diff.prefixCharacters} 个 UTF-16 单元。上次 ${diff.totalBefore} → 捕获 ${diff.totalAfter}。这不是 token 数量，也不是 API 缓存命中率。`));
+        const firstField = first ? diff.rows[first.index]?.fieldDiffs.find(field => field.field === first.field) : null;
+        const firstText = firstField?.beforeText ?? firstField?.afterText;
+        const firstLine = typeof firstText === 'string' ? firstText.slice(0, firstField.commonPrefix).split('\n').length : null;
+        summary.append(node('strong', first ? `第一处差异：消息 #${first.index + 1} · ${first.field}${firstLine ? ` · 第 ${firstLine} 行` : ''} · UTF-16 偏移 ${first.characterPosition}` : '消息输入完全相同'));
+        summary.append(node('p', `消息条数：上次 ${result.previous.messages.length} → 捕获 ${result.current.messages.length}。规范化 JSON 相同前缀 ${diff.prefixCharacters} 个 UTF-16 单元（上次总长 ${diff.totalBefore} → 捕获 ${diff.totalAfter}）。这不是 token 数量，也不是 API 缓存命中率。`));
         if (result.previous && (result.previous.model !== result.current.model || result.previous.source !== result.current.source)) {
             summary.append(node('p', '模型或提供商已变化：即使消息相同，也不应推断缓存可复用。', 'wbo-warning'));
         }
@@ -158,7 +167,7 @@ export function mountRequestDiff(runtime, target = document.body) {
                     const lines = field.lineDiff;
                     const details = node('details'); details.open = true;
                     const summaryText = lines?.supported
-                        ? `${field.field} · 共 ${lines.beforeLineCount} 行，变化 ${lines.changedLineCount} 行，${lines.hunks.length} 个区段`
+                        ? `${field.field} · 删除 ${lines.deleteCount} 行 / 新增 ${lines.insertCount} 行 · ${lines.hunks.length} 个展示区段`
                         : `${field.field} · 共同开头 ${field.commonPrefix} · 共同结尾 ${field.commonSuffix}（UTF-16 单元）`;
                     details.append(node('summary', summaryText));
                     details.append(lines?.supported
@@ -186,6 +195,7 @@ export function mountRequestDiff(runtime, target = document.body) {
             report(next.previous ? '捕获完成，已取消本次 AI 请求。' : '捕获完成，已取消本次 AI 请求；此前没有真实请求记录，因此只列出本次捕获内容。');
         } catch (error) {
             result = null; diff = null; summary.replaceChildren(); cards.replaceChildren();
+            undoBar.hidden = !runtime.wroteChatMessage?.();
             report(error.message, true);
         } finally {
             busy = false; panel.removeAttribute('aria-busy'); panel.querySelectorAll('button,input,select').forEach(n => { n.disabled = false; });
@@ -203,11 +213,14 @@ export function mountRequestDiff(runtime, target = document.body) {
         showEqualLabel,
         button('跳到第一处差异', () => {
             if (!diff?.firstDifference) { report('还没有可跳转的差异。'); return; }
+            // An unchanged 7000-line prefix can occupy the first page in "show equal" mode.
+            // Switch to contextual changes before jumping, rather than failing silently.
+            if (showEqualLines.checked) { showEqualLines.checked = false; render(); }
             const card = cards.querySelector(`[data-message-index="${diff.firstDifference.index}"]`);
             card?.scrollIntoView({ block: 'start' });
             card?.querySelector('mark')?.scrollIntoView({ block: 'center' });
         }),
-        button('清除请求记录', () => { runtime.clear(); result = null; diff = null; summary.replaceChildren(); cards.replaceChildren(); undoBar.hidden = true; refreshBaseline(); report('内存中的请求记录已清除（不会删除已写入聊天的消息）。'); }),
+        button('清除请求记录', () => { runtime.clear(); result = null; diff = null; summary.replaceChildren(); cards.replaceChildren(); undoBar.hidden = !runtime.wroteChatMessage?.(); refreshBaseline(); report('内存中的请求记录已清除；安全撤回信息仍保留，不自动删除聊天消息。'); }),
     );
     filter.onchange = render;
     showEqualLines.onchange = render;
