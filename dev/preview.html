@@ -1,8 +1,28 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WorldBook Opt 测试预览</title><link rel="stylesheet" href="../style.css"><style>body{background:#111723;color:#e4e8f0;font-family:system-ui;margin:30px}</style><h1>WorldBook Opt · 独立测试环境</h1><p>这里仅操作内存中的模拟世界书，不连接真实酒馆。</p><button id="open">打开优化器</button><script type="module">
-import {mountOptimizer} from '../ui.js';
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WorldBook Opt 样式兼容测试</title><link rel="stylesheet" href="../style.css">
+<style>
+/* Deliberately loaded after extension CSS: reproduce host icon-button sizing. */
+body{background:#111723;color:#e4e8f0;font-family:system-ui;margin:24px;font-size:20px}
+button,.menu_button{width:40px;min-width:40px;white-space:normal;overflow-wrap:anywhere;font-size:inherit;background:#252c3c;color:inherit}
+#layout-check{width:auto;max-width:100%;font-size:14px}
+body.compact{width:340px;max-width:calc(100vw - 24px);margin:12px}
+body.compact .wbo-overlay{width:min(375px,100vw);padding:6px}
+body.compact .wbo-panel{padding:16px}
+body.compact .wbo-diff{grid-template-columns:1fr}
+</style>
+<h1 style="font-size:20px">WorldBook Opt · 宿主样式回归测试</h1>
+<p style="font-size:14px">仅操作模拟世界书。测试页刻意设置通用按钮宽40px，验证生产入口和面板不受影响。</p>
+<p id="layout-result" role="status" style="font-size:14px"></p><button id="layout-check">检查布局</button>
+<script type="module">
+import {init} from '../index.js';
 const entry=(uid,content,extra={})=>({uid,comment:['世界背景','规则与叙事','当前变量','禁用测试','固定尾部'][uid],content,key:['故事'],keysecondary:[],disable:false,constant:false,selective:false,position:0,order:100,cooldown:0,...extra});
 let book={entries:{0:entry(0,'这是一座海边城市，旧灯塔守望着永恒的潮汐。'),1:entry(1,'保持人物性格一致，不要替用户做决定。',{position:4,depth:12,role:0,constant:true}),2:entry(2,'当前情绪：{{getvar::mood}}',{position:0,order:80}),3:entry(3,'禁用条目正文',{disable:true}),4:entry(4,'自然描写环境，避免重复套话。',{constant:true,position:4,depth:0,role:1})}};
 let cache=structuredClone(book),backups=[];
 const adapter={async list(){return ['测试世界书']},async read(){return structuredClone(book)},cached(){return structuredClone(cache)},async write(n,data){book=structuredClone(data);cache=structuredClone(data)},getBackups(){return structuredClone(backups)},putBackups(data){backups=structuredClone(data)}};
-document.getElementById('open').onclick=()=>mountOptimizer(adapter);
+if(new URL(location.href).searchParams.has('compact'))document.body.classList.add('compact');
+const host=document.createElement('div');host.id='extensions_settings2';document.body.append(host);
+await init(async()=>adapter);
+function check(){const buttons=[...document.querySelectorAll('.wbo-button')].filter(x=>x.getClientRects().length);const bad=buttons.filter(x=>{const r=x.getBoundingClientRect();return r.height>60||x.scrollWidth>x.clientWidth+1||getComputedStyle(x).whiteSpace!=='nowrap'});const panel=document.querySelector('.wbo-panel');const overflow=panel&&panel.scrollWidth>panel.clientWidth+1;document.getElementById('layout-result').textContent=bad.length||overflow?`FAIL：${bad.length} 个按钮异常，面板溢出 ${Boolean(overflow)}`:`PASS：${buttons.length} 个按钮横向显示、无截断，面板无横向溢出`}
+document.getElementById('layout-check').onclick=check;document.addEventListener('click',()=>setTimeout(check,0));requestAnimationFrame(check);
 </script></html>
