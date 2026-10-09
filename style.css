@@ -39,6 +39,13 @@
 .wbo-panel pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;background:#0002;padding:12px;font-size:12px}
 .wbo-backups{border-top:1px solid #ffffff20;margin-top:24px;padding-top:18px}
 .wbo-panel :focus-visible{outline:2px solid #90cfc3;outline-offset:3px}
+#extensionsMenu .wbo-wand-button{display:flex;align-items:center;gap:10px;width:100%;height:auto;min-height:36px;padding:8px 12px;white-space:normal;word-break:normal;overflow-wrap:normal;font-family:inherit;font-size:14px;line-height:1.5;text-align:left;background:transparent;color:inherit;border:0;cursor:pointer;box-sizing:border-box}
+#extensionsMenu .wbo-wand-button i{flex:0 0 auto}
+.wbo-preview-consent{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:1.6;margin:12px 0}
+.wbo-preview-consent input[type="checkbox"]{flex:0 0 16px;width:16px;min-width:16px;height:16px;margin:3px 0 0}
+.wbo-request-panel .wbo-diff-mark{background:#b55f2b88;color:inherit;border-bottom:1px solid #e9ad69}
+.wbo-request-panel .wbo-card{scroll-margin-top:12px}
+.wbo-request-panel .wbo-request-text{min-width:0;tab-size:4}
 @media(max-width:600px){.wbo-overlay{padding:6px}
 .wbo-panel{padding:16px;max-height:96vh}
 .wbo-diff{grid-template-columns:1fr}
