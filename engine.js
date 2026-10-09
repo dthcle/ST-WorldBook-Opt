@@ -15,6 +15,10 @@ export const ENGINE_WARNINGS = Object.freeze([
     '未识别字段原样保留；本工具不能证明未知扩展字段没有特殊行为。',
 ]);
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+// Native world info uses integer UIDs in older ST; some versions/forks use UUIDs.
+// Accept both representations without converting, renumbering, or changing object keys.
+const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+const validUid = value => (Number.isSafeInteger(value) && value >= 0) || uuid(value);
 const clone = value => JSON.parse(JSON.stringify(value));
 const equal = (a, b) => {
     if (a === b) return true;
@@ -52,9 +56,10 @@ export function validateWorldInfo(book) {
     for (const [id, e] of Object.entries(book.entries)) {
         const p = `entries[${JSON.stringify(id)}]`;
         if (!record(e)) { errors.push(`${p}: 条目必须是对象`); continue; }
-        if (!Number.isSafeInteger(e.uid) || e.uid < 0) errors.push(`${p}.uid: 必须是非负安全整数`);
-        else if (seen.has(e.uid)) errors.push(`${p}.uid: uid 重复`);
-        seen.add(e.uid);
+        const identity = uuid(e.uid) ? e.uid.toLowerCase() : e.uid;
+        if (!validUid(e.uid)) errors.push(`${p}.uid: 必须是非负安全整数或 UUID 字符串`);
+        else if (seen.has(identity)) errors.push(`${p}.uid: uid 重复`);
+        seen.add(identity);
         for (const field of ['disable', 'constant', 'selective']) if (typeof e[field] !== 'boolean') errors.push(`${p}.${field}: 必须是布尔值`);
         if (!Number.isSafeInteger(e.position) || e.position < 0) errors.push(`${p}.position: 必须是非负安全整数`);
         if (!Number.isSafeInteger(e.order)) errors.push(`${p}.order: 必须是安全整数`);

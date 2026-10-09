@@ -17,6 +17,9 @@ import {buildSettingsDrawer} from '../index.js';
 import {mountOptimizer} from '../ui.js';
 const entry=(uid,content,extra={})=>({uid,comment:['世界背景','规则与叙事','当前变量','禁用测试','固定尾部'][uid],content,key:['故事'],keysecondary:[],disable:false,constant:false,selective:false,position:0,order:100,cooldown:0,...extra});
 let book={entries:{0:entry(0,'这是一座海边城市，旧灯塔守望着永恒的潮汐。'),1:entry(1,'保持人物性格一致，不要替用户做决定。',{position:4,depth:12,role:0,constant:true}),2:entry(2,'当前情绪：{{getvar::mood}}',{position:0,order:80}),3:entry(3,'禁用条目正文',{disable:true}),4:entry(4,'自然描写环境，避免重复套话。',{constant:true,position:4,depth:0,role:1})}};
+if(new URL(location.href).searchParams.has('uuid')) {
+  book.entries=Object.fromEntries(Object.values(book.entries).map((item,i)=>{const uid=`00000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`;return [uid,{...item,uid}]}));
+}
 let cache=structuredClone(book),backups=[];
 const adapter={async list(){return ['测试世界书']},async read(){return structuredClone(book)},cached(){return structuredClone(cache)},async write(n,data){book=structuredClone(data);cache=structuredClone(data)},getBackups(){return structuredClone(backups)},putBackups(data){backups=structuredClone(data)}};
 if(new URL(location.href).searchParams.has('compact'))document.body.classList.add('compact');
