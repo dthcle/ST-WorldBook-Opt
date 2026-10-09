@@ -5,7 +5,8 @@
  */
 const MAX_CHARS = 1_500_000;
 const MAX_LINES = 40_000;
-const LOOKAHEAD = 8;
+const MAX_DEPTH = 64;
+const SMALL_REGION = 8;
 
 export function splitLines(text) {
     if (typeof text !== 'string') throw new TypeError('text 必须是字符串');
@@ -22,35 +23,100 @@ function commonEnds(a, b) {
     return { start, suffix };
 }
 
-/** Align two line arrays. Equal lines pair up; small shifts become insert/delete rows. */
-export function alignLines(beforeLines, afterLines) {
-    const rows = [];
-    let i = 0, j = 0;
-    while (i < beforeLines.length && j < afterLines.length) {
-        if (beforeLines[i] === afterLines[j]) {
-            rows.push({ type: 'equal', beforeIndex: i, afterIndex: j });
-            i++; j++;
-            continue;
+function countLines(lines) {
+    const counts = new Map();
+    for (const line of lines) counts.set(line, (counts.get(line) ?? 0) + 1);
+    return counts;
+}
+
+/** Longest strictly increasing subsequence of indices, by `value`. */
+function longestIncreasing(items, value) {
+    const tails = [], previous = new Array(items.length).fill(-1), tailIndex = [];
+    for (let index = 0; index < items.length; index++) {
+        const target = value(items[index]);
+        let low = 0, high = tails.length;
+        while (low < high) {
+            const mid = (low + high) >> 1;
+            if (tails[mid] < target) low = mid + 1; else high = mid;
         }
-        let shift = 0;
-        for (let k = 1; k <= LOOKAHEAD; k++) {
-            if (j + k < afterLines.length && beforeLines[i] === afterLines[j + k]) { shift = k; break; }
-            if (i + k < beforeLines.length && beforeLines[i + k] === afterLines[j]) { shift = -k; break; }
-        }
-        if (shift > 0) {
-            for (let k = 0; k < shift; k++) rows.push({ type: 'insert', beforeIndex: null, afterIndex: j + k });
-            j += shift;
-        } else if (shift < 0) {
-            for (let k = 0; k < -shift; k++) rows.push({ type: 'delete', beforeIndex: i + k, afterIndex: null });
-            i += -shift;
-        } else {
-            rows.push({ type: 'change', beforeIndex: i, afterIndex: j });
-            i++; j++;
-        }
+        tails[low] = target;
+        previous[index] = low > 0 ? tailIndex[low - 1] : -1;
+        tailIndex[low] = index;
     }
-    while (i < beforeLines.length) rows.push({ type: 'delete', beforeIndex: i++, afterIndex: null });
-    while (j < afterLines.length) rows.push({ type: 'insert', beforeIndex: null, afterIndex: j++ });
-    return rows;
+    const result = [];
+    for (let index = tailIndex[tails.length - 1]; index !== undefined && index >= 0; index = previous[index]) result.push(items[index]);
+    return result.reverse();
+}
+
+/**
+ * Patience-style alignment: anchor on lines that are unique in both sides, keep the longest
+ * consistent chain (LIS), then recurse between anchors. This stays correct when a whole block
+ * is rewritten or shifted, unlike a greedy lookahead scan.
+ */
+export function alignLines(beforeLines, afterLines) {
+    const beforeCount = countLines(beforeLines), afterCount = countLines(afterLines);
+    const out = [];
+    const pairUp = (aStart, aEnd, bStart, bEnd) => {
+        const aLength = aEnd - aStart, bLength = bEnd - bStart;
+        // Only pair neighbouring lines when both sides are small: pairing an 11-line block with
+        // a 700-line block would invent 1:1 "changes" that never existed.
+        if (aLength <= SMALL_REGION && bLength <= SMALL_REGION) {
+            const shared = Math.min(aLength, bLength);
+            for (let k = 0; k < shared; k++) out.push({ type: 'change', beforeIndex: aStart + k, afterIndex: bStart + k });
+            for (let i = aStart + shared; i < aEnd; i++) out.push({ type: 'delete', beforeIndex: i, afterIndex: null });
+            for (let j = bStart + shared; j < bEnd; j++) out.push({ type: 'insert', beforeIndex: null, afterIndex: j });
+            return;
+        }
+        for (let i = aStart; i < aEnd; i++) out.push({ type: 'delete', beforeIndex: i, afterIndex: null });
+        for (let j = bStart; j < bEnd; j++) out.push({ type: 'insert', beforeIndex: null, afterIndex: j });
+    };
+    const recurse = (aStart, aEnd, bStart, bEnd, depth) => {
+        while (aStart < aEnd && bStart < bEnd && beforeLines[aStart] === afterLines[bStart]) {
+            out.push({ type: 'equal', beforeIndex: aStart, afterIndex: bStart });
+            aStart++; bStart++;
+        }
+        const suffix = [];
+        while (aEnd > aStart && bEnd > bStart && beforeLines[aEnd - 1] === afterLines[bEnd - 1]) {
+            aEnd--; bEnd--;
+            suffix.push({ type: 'equal', beforeIndex: aEnd, afterIndex: bEnd });
+        }
+        if (aStart === aEnd) {
+            for (let j = bStart; j < bEnd; j++) out.push({ type: 'insert', beforeIndex: null, afterIndex: j });
+        } else if (bStart === bEnd) {
+            for (let i = aStart; i < aEnd; i++) out.push({ type: 'delete', beforeIndex: i, afterIndex: null });
+        } else if (depth >= MAX_DEPTH) {
+            pairUp(aStart, aEnd, bStart, bEnd);
+        } else {
+            const positions = new Map();
+            for (let i = aStart; i < aEnd; i++) {
+                const line = beforeLines[i];
+                if (beforeCount.get(line) === 1 && afterCount.get(line) === 1) positions.set(line, i);
+            }
+            const anchors = [];
+            if (positions.size) {
+                for (let j = bStart; j < bEnd; j++) {
+                    const line = afterLines[j];
+                    if (afterCount.get(line) === 1 && positions.has(line)) anchors.push([positions.get(line), j]);
+                }
+            }
+            if (!anchors.length) {
+                pairUp(aStart, aEnd, bStart, bEnd);
+            } else {
+                anchors.sort((left, right) => left[0] - right[0]);
+                const chain = longestIncreasing(anchors, pair => pair[1]);
+                let previousA = aStart, previousB = bStart;
+                for (const [anchorA, anchorB] of chain) {
+                    recurse(previousA, anchorA, previousB, anchorB, depth + 1);
+                    out.push({ type: 'equal', beforeIndex: anchorA, afterIndex: anchorB });
+                    previousA = anchorA + 1; previousB = anchorB + 1;
+                }
+                recurse(previousA, aEnd, previousB, bEnd, depth + 1);
+            }
+        }
+        for (let index = suffix.length - 1; index >= 0; index--) out.push(suffix[index]);
+    };
+    recurse(0, beforeLines.length, 0, afterLines.length, 0);
+    return out;
 }
 
 /**
@@ -65,7 +131,7 @@ export function diffLines(before, after, { maxChars = MAX_CHARS, maxLines = MAX_
     const beforeLines = splitLines(a), afterLines = splitLines(b);
     const unsupported = reason => ({
         supported: false, reason, beforeLineCount: beforeLines.length, afterLineCount: afterLines.length,
-        changedLineCount: 0, rows: [], commonPrefix: common.start, commonSuffix: common.suffix,
+        changedLineCount: 0, hunks: [], rows: [], commonPrefix: common.start, commonSuffix: common.suffix,
     });
     if (a.length + b.length > maxChars) return unsupported('文本过大，未逐行对比。');
     if (beforeLines.length + afterLines.length > maxLines) return unsupported('行数过多，未逐行对比。');
@@ -88,6 +154,23 @@ export function diffLines(before, after, { maxChars = MAX_CHARS, maxLines = MAX_
     });
     return {
         supported: true, beforeLineCount: beforeLines.length, afterLineCount: afterLines.length,
-        changedLineCount, rows, commonPrefix: common.start, commonSuffix: common.suffix,
+        changedLineCount, hunks: collectHunks(rows), rows, commonPrefix: common.start, commonSuffix: common.suffix,
     };
+}
+
+/** Contiguous runs of differing rows, as 1-based inclusive line ranges for direct reporting. */
+function collectHunks(rows) {
+    const hunks = [];
+    let current = null;
+    for (const row of rows) {
+        if (row.type === 'equal') { current = null; continue; }
+        if (!current) { current = { beforeStart: null, beforeEnd: null, afterStart: null, afterEnd: null, lines: 0, inserts: 0, deletes: 0, changes: 0 }; hunks.push(current); }
+        current.lines++;
+        if (row.beforeIndex !== null) current.beforeStart ??= row.beforeIndex + 1, current.beforeEnd = row.beforeIndex + 1;
+        if (row.afterIndex !== null) current.afterStart ??= row.afterIndex + 1, current.afterEnd = row.afterIndex + 1;
+        if (row.type === 'insert') current.inserts++;
+        else if (row.type === 'delete') current.deletes++;
+        else current.changes++;
+    }
+    return hunks;
 }

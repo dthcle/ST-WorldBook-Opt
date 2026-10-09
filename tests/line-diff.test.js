@@ -81,12 +81,38 @@ test('diffLines handles empty sides', () => {
     assert.equal(removed.changedLineCount, 2);
 });
 
-test('line alignment survives a shift larger than the lookahead by falling back to changes', () => {
-    const before = Array.from({ length: 20 }, (_, i) => `L${i}`);
-    const after = ['new1', 'new2', ...before];
-    const diff = diffLines(before.join('\n'), after.join('\n'));
-    assert.equal(diff.supported, true);
-    // The 20 stable lines must still be recognised as equal despite the 2-line shift.
-    assert.equal(diff.rows.filter(r => r.type === 'equal').length, 20);
-    assert.equal(diff.changedLineCount, 2);
+test('diffLines reports 1-based hunk ranges with change/add/delete counts', () => {
+    const before = ['keep', 'a', 'b', 'keep2', 'c'].join('\n');
+    const after = ['keep', 'a2', 'b2', 'keep2', 'c', 'd'].join('\n');
+    const diff = diffLines(before, after);
+    assert.equal(diff.hunks.length, 2);
+    assert.deepEqual(
+        { s: diff.hunks[0].beforeStart, e: diff.hunks[0].beforeEnd, changes: diff.hunks[0].changes },
+        { s: 2, e: 3, changes: 2 },
+    );
+    const last = diff.hunks.at(-1);
+    assert.equal(last.inserts, 1);
+    assert.equal(last.beforeStart, null, 'a pure insertion has no before range');
+    assert.equal(last.afterStart, 6);
 });
+
+test('a large all-new region is reported as inserts, not invented 1:1 changes', () => {
+    // Regression: pairing an 11-line block with a 700-line block fabricated differences.
+    const before = Array.from({ length: 11 }, (_, i) => `old ${i}`);
+    const after = Array.from({ length: 700 }, (_, i) => `new ${i}`);
+    const diff = diffLines(before.join('\n'), after.join('\n'));
+    const hunk = diff.hunks[0];
+    assert.equal(hunk.changes, 0, 'no fabricated change pairs');
+    assert.equal(hunk.deletes, 11);
+    assert.equal(hunk.inserts, 700);
+});
+
+test('patience alignment keeps a stable tail aligned across a large insertion', () => {
+    const stable = Array.from({ length: 300 }, (_, i) => `stable line ${i}`);
+    const before = ['head', ...stable.slice(0, 150), ...stable.slice(150)].join('\n');
+    const after = ['head', ...Array.from({ length: 400 }, (_, i) => `inserted ${i}`), ...stable].join('\n');
+    const diff = diffLines(before, after);
+    assert.equal(diff.rows.filter(r => r.type === 'equal').length, 301, 'head + 300 stable lines stay equal');
+    assert.equal(diff.changedLineCount, 400);
+});
+

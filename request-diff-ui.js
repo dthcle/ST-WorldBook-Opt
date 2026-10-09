@@ -36,7 +36,16 @@ function lineRows(lines, field, showEqual = false) {
     }
     const visible = all.map((row, index) => ({ row, index })).filter(item => keep.has(item.index));
     const container = node('div', undefined, 'wbo-lines');
-    container.append(node('p', `逐行差异：上次 ${lines.beforeLineCount} 行 → 捕获 ${lines.afterLineCount} 行，其中变化 ${lines.changedLineCount} 行。字符偏移不是 token 数。`, 'wbo-muted'));
+    container.append(node('p', `逐行差异：上次 ${lines.beforeLineCount} 行 → 捕获 ${lines.afterLineCount} 行，其中变化 ${lines.changedLineCount} 行，集中在 ${lines.hunks.length} 个区段。字符偏移不是 token 数。`, 'wbo-muted'));
+    if (lines.hunks.length) {
+        const ranges = lines.hunks.slice(0, 6).map(hunk => {
+            const before = hunk.beforeStart === null ? '—' : `${hunk.beforeStart}–${hunk.beforeEnd}`;
+            const after = hunk.afterStart === null ? '—' : `${hunk.afterStart}–${hunk.afterEnd}`;
+            const detail = [hunk.changes ? `改 ${hunk.changes}` : '', hunk.deletes ? `删 ${hunk.deletes}` : '', hunk.inserts ? `增 ${hunk.inserts}` : ''].filter(Boolean).join('、');
+            return `上次 ${before} 行 → 捕获 ${after} 行（${detail}）`;
+        });
+        container.append(node('p', `差异区段：${ranges.join('；')}${lines.hunks.length > 6 ? `；…共 ${lines.hunks.length} 段` : ''}。`, 'wbo-muted'));
+    }
     const useTwoColumns = all.some(row => (row.beforeText ?? row.afterText ?? '').length > 400);
     container.classList.toggle('wbo-lines-wide', useTwoColumns);
     let rendered = 0;
@@ -149,7 +158,7 @@ export function mountRequestDiff(runtime, target = document.body) {
                     const lines = field.lineDiff;
                     const details = node('details'); details.open = true;
                     const summaryText = lines?.supported
-                        ? `${field.field} · 共 ${lines.beforeLineCount} 行，变化 ${lines.changedLineCount} 行`
+                        ? `${field.field} · 共 ${lines.beforeLineCount} 行，变化 ${lines.changedLineCount} 行，${lines.hunks.length} 个区段`
                         : `${field.field} · 共同开头 ${field.commonPrefix} · 共同结尾 ${field.commonSuffix}（UTF-16 单元）`;
                     details.append(node('summary', summaryText));
                     details.append(lines?.supported
