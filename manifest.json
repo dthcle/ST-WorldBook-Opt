@@ -1,0 +1,11 @@
+{
+  "display_name": "WorldBook Opt · 世界书缓存优化",
+  "loading_order": 60,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "dthcle",
+  "version": "0.1.0",
+  "homePage": "https://github.com/dthcle/ST-WorldBook-Opt"
+}

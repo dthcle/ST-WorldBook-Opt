@@ -1,0 +1,9 @@
+{
+  "name": "st-worldbook-opt",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Independent, dependency-free native world-info planning engine",
+  "scripts": { "test": "node --test" },
+  "engines": { "node": ">=18" }
+}
