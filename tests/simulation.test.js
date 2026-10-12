@@ -32,7 +32,7 @@ function fixture(t, options = {}) {
         listenerCount(event) { return (listeners.get(event) ?? []).length; },
     };
     const state = { characterId: 0, groupId: null, chatId: 'chat-1', mainApi: 'openai', chat: history(), generating: false, ...options.state };
-    const stats = { dryRuns: 0, ordinaryGenerates: 0, inputReads: 0, attachmentReads: 0, documentReads: 0,
+    const stats = { dryRuns: 0, ordinaryGenerates: 0, userSends: 0, inputReads: 0, attachmentReads: 0, documentReads: 0,
         stops: 0, contexts: [], data: null, cleaned: false, error: null, transport: [] };
     const started = deferred(), cleanupStarted = deferred(), finished = deferred();
     const host = {
@@ -45,10 +45,11 @@ function fixture(t, options = {}) {
     };
     const originalFetch = host.fetch;
     const getContext = () => ({
-        ...state, eventSource, eventTypes: { GENERATE_AFTER_DATA: AFTER_DATA },
+        ...state, name1: 'User', eventSource, eventTypes: { GENERATE_AFTER_DATA: AFTER_DATA },
         getChatCompletionModel: () => 'simulation-model',
         chatCompletionSettings: { chat_completion_source: 'custom' },
         generate() { stats.ordinaryGenerates++; throw new Error('ordinary Generate fallback forbidden'); },
+        sendMessageAsUser() { stats.userSends++; throw new Error('persistent user send forbidden'); },
         ...options.context,
     });
     const helpers = { state, stats, host, eventSource, getContext };
@@ -92,8 +93,8 @@ function fixture(t, options = {}) {
         isGenerating: () => state.generating,
         stopGeneration: () => { stats.stops++; if (options.stopThrows) throw new Error('broken stop'); },
         timeoutMs: options.timeoutMs ?? 2000, now: () => STAMP,
-        getInput: () => { stats.inputReads++; throw new Error('composer getter must never run'); },
-        hasAttachment: () => { stats.attachmentReads++; throw new Error('attachments must never be inspected'); },
+        getInput: () => { stats.inputReads++; return options.input ?? 'Unsent draft'; },
+        hasAttachment: () => { stats.attachmentReads++; return options.attachment ?? false; },
         getPromptError: () => options.promptError ?? null,
         ...options.config,
     };
@@ -103,14 +104,7 @@ function fixture(t, options = {}) {
 }
 
 function realPost(f, body = { model: 'real-model', chat_completion_source: 'openai', messages: [{ role: 'user', content: 'Actual transport input' }] }, init = {}) {
-    // Native normal dispatch sees the latest user before its assistant reply is
-    // generated. Keep fixture replies for simulation while modeling that exact
-    // dispatch instant; the wrapper snapshots synchronously before its first await.
-    const chat = f.state.chat;
-    let index = Array.isArray(chat) ? chat.findLastIndex(message => message?.is_user && !message?.is_system) : -1;
-    const replies = index >= 0 ? chat.splice(index + 1) : [];
-    try { return f.host.fetch(ENDPOINT, { method: 'POST', body: JSON.stringify(body), ...init }); }
-    finally { if (replies.length) chat.push(...replies); }
+    return f.host.fetch(ENDPOINT, { method: 'POST', body: JSON.stringify(body), ...init });
 }
 async function settle(f) { await f.finished.promise; await tick(); }
 function assertOriginals(chat, originals) {
@@ -122,6 +116,7 @@ function assertNoComposerRead(f) {
     assert.equal(f.stats.attachmentReads, 0);
     assert.equal(f.stats.documentReads, 0);
     assert.equal(f.stats.ordinaryGenerates, 0);
+    assert.equal(f.stats.userSends, 0);
 }
 function assertClean(f, chat, originals) {
     assert.equal(f.runtime.isBusy(), false);
@@ -188,7 +183,7 @@ test('useReplayChat clone failure leaves original array and objects untouched', 
     assertOriginals(chat, originals);
 });
 
-// dry-run output and the empty/replay history contracts.
+// Native dry-run output and the empty/draft full-current-history contracts.
 test('empty simulation uses complete current chat clones, appends no input, and awaits late event mutations', async t => {
     const cleanupGate = deferred();
     const f = fixture(t, { cleanupGate, lateListener: async (data, dryRun, ctx) => {
@@ -262,64 +257,123 @@ for (const value of ['', 'plain unsent text', ' /send dangerous', '/upload file'
         assert.equal(f.stats.transport.length, 0);
     });
 
-test('replay uses acknowledged dispatch history excluding latest assistant and repeated runs restore original identities', async t => {
-    const seen = [];
-    const f = fixture(t, { run: async (ctx, { eventSource }) => {
-        seen.push(ctx.chat.slice());
-        assert.deepEqual(ctx.chat.map(message => message.mes), ['Greeting', 'Last real input']);
-        ctx.chat[0].mes = 'Temporary greeting rewrite';
-        ctx.chat[1].extra.marker = 'Temporary user metadata rewrite';
-        await eventSource.emit(AFTER_DATA, { prompt: promptFor(ctx.chat) }, true);
-        ctx.chat.push({ is_user: false, mes: 'Temporary plugin append' });
-    } });
-    await realPost(f);
-    const baseline = f.runtime.getLast();
-    f.state.chat[1].mes = 'Edited since actual send';
-    f.state.chat.push({ is_user: true, mes: 'Later user not sent' }, { is_user: false, mes: 'Later assistant not in baseline' });
-    const chat = f.state.chat, originals = chat.slice(), values = structuredClone(chat);
-    for (let i = 0; i < 3; i++) {
-        const result = await f.runtime.simulate({ mode: 'replay' });
-        assert.deepEqual(result.previous, baseline);
-        assert.equal(result.current.mode, 'replay');
-        assert.deepEqual(result.current.messages, [
-            { role: 'assistant', content: 'Temporary greeting rewrite' }, { role: 'user', content: 'Last real input' },
-        ]);
-        assert.deepEqual(chat, values);
-        assertClean(f, chat, originals);
-    }
-    assert.notEqual(seen[0][0], seen[1][0], 'every replay gets fresh clones');
-    assert.notEqual(seen[1][1], seen[2][1]);
-    seen.flat().forEach(message => assert.equal(originals.includes(message), false));
-    assert.deepEqual(f.runtime.getLast(), baseline);
-    assert.equal(f.stats.transport.length, 1, 'only the explicit real baseline request delegated');
-});
-
-test('empty after replay uses current full history rather than the acknowledged replay prefix', async t => {
-    const f = fixture(t);
-    await realPost(f);
-    await f.runtime.simulate({ mode: 'replay' });
-    const currentChat = f.state.chat;
-    const result = await f.runtime.simulate({ mode: 'empty' });
-    assert.deepEqual(result.current.messages, promptFor(currentChat));
-    assert.equal(result.current.messages.at(-1).content, 'Latest assistant reply');
-});
-
-test('replay requires an acknowledged actual request with a user snapshot, never a simulated baseline', async t => {
-    const f = fixture(t);
-    await assert.rejects(f.runtime.simulate({ mode: 'replay' }), /暂无上次用户发送快照/);
-    const simulation = await f.runtime.simulate();
-    f.runtime.setSimulationBase(simulation.current);
-    await assert.rejects(f.runtime.simulate({ mode: 'replay' }), /暂无上次用户发送快照/);
-    assert.equal(f.stats.dryRuns, 1);
+test('draft reads composer once, appends only a plain cloned user to full current chat, and leaves composer/originals unchanged', async t => {
+    const composer = { value: '  {{user}} raw draft  ' };
+    let reads = 0, writes = 0;
+    const f = fixture(t, { config: { getInput: () => { reads++; return composer.value; } },
+        run: async (ctx, { eventSource }) => {
+            assert.equal(ctx.chat, chat, 'keep the original exported array binding');
+            assert.equal(ctx.chat.length, originals.length + 1);
+            originals.forEach((message, index) => assert.notEqual(ctx.chat[index], message));
+            assert.deepEqual(ctx.chat.slice(0, -1), originalValues, 'include latest assistant, not a prior-send prefix');
+            const draft = ctx.chat.at(-1);
+            assert.deepEqual(draft, { name: 'User', is_user: true, is_system: false, mes: composer.value, send_date: STAMP, extra: {} });
+            await eventSource.emit(AFTER_DATA, { prompt: promptFor(ctx.chat) }, true);
+            ctx.chat[0].extra.marker = 'temporary clone mutation';
+            draft.mes = 'temporary draft mutation';
+        } });
+    Object.defineProperty(composer, 'value', { get: () => '  {{user}} raw draft  ', set() { writes++; throw new Error('composer mutation forbidden'); } });
+    const chat = f.state.chat, originals = chat.slice(), originalValues = structuredClone(chat);
+    const result = await f.runtime.simulate({ mode: 'draft' });
+    assert.equal(reads, 1);
+    assert.equal(writes, 0);
+    assert.equal(composer.value, '  {{user}} raw draft  ');
+    assert.equal(f.stats.attachmentReads, 1);
+    assert.equal(f.stats.documentReads, 0);
+    assert.equal(f.stats.ordinaryGenerates, 0);
+    assert.equal(f.stats.userSends, 0);
+    assert.equal(result.current.mode, 'draft');
+    assert.deepEqual(result.current.messages, [...promptFor(originalValues), { role: 'user', content: composer.value }]);
+    assert.equal(result.previous, null);
+    assert.equal(result.wroteMessage, false);
+    assert.ok(result.warnings.some(value => /正则\/宏.*近似/.test(value)));
+    assert.equal(result.warnings.some(value => /重放/.test(value)), false);
+    assertOriginals(chat, originals);
+    assert.deepEqual(chat, originalValues);
+    assert.equal(f.runtime.isBusy(), false);
+    assert.equal(f.eventSource.listenerCount(AFTER_DATA), 0);
     assert.equal(f.stats.transport.length, 0);
 });
 
-test('acknowledged real request without any user message is a baseline but cannot replay', async t => {
+for (const input of ['', ' /send dangerous', '\n\t/upload file'])
+    test(`draft ${JSON.stringify(input)} ${input ? 'rejects slash commands' : 'is a temporary empty plain user message'}`, async t => {
+        const f = fixture(t, { input });
+        const chat = f.state.chat, originals = chat.slice();
+        if (input) {
+            await assert.rejects(f.runtime.simulate({ mode: 'draft' }), /斜杠命令/);
+            assert.equal(f.stats.attachmentReads, 0);
+            assert.equal(f.stats.dryRuns, 0);
+        } else {
+            const result = await f.runtime.simulate({ mode: 'draft' });
+            assert.deepEqual(result.current.messages.at(-1), { role: 'user', content: '' });
+            assert.equal(f.stats.attachmentReads, 1);
+        }
+        assert.equal(f.stats.inputReads, 1);
+        assertOriginals(chat, originals);
+        assert.equal(f.stats.transport.length, 0);
+        assert.equal(f.stats.ordinaryGenerates, 0);
+        assert.equal(f.stats.userSends, 0);
+    });
+
+test('draft rejects pending attachments before replacing history or running generation', async t => {
+    const f = fixture(t, { attachment: true });
+    const chat = f.state.chat, originals = chat.slice();
+    await assert.rejects(f.runtime.simulate({ mode: 'draft' }), /附件/);
+    assert.equal(f.stats.inputReads, 1);
+    assert.equal(f.stats.attachmentReads, 1);
+    assert.equal(f.stats.dryRuns, 0);
+    assert.equal(f.stats.transport.length, 0);
+    assertOriginals(chat, originals);
+});
+
+for (const mode of ['replay', 'manual'])
+    test(`obsolete ${mode} mode rejects and manual simulation-base API is absent`, async t => {
+        const f = fixture(t);
+        assert.equal(f.runtime.getSimulationBase, undefined);
+        assert.equal(f.runtime.setSimulationBase, undefined);
+        await assert.rejects(f.runtime.simulate({ mode }), /未知模拟方式/);
+        assertNoComposerRead(f);
+        assert.equal(f.stats.dryRuns, 0);
+    });
+
+test('N-1 actual BASE compares to N upcoming full history, and repeated empty/draft never advances BASE or pair', async t => {
+    const f = fixture(t);
+    await realPost(f, { model: 'N-1', messages: [{ role: 'user', content: 'N-1 actual input' }] });
+    const baseline = f.runtime.getLast(), pair = f.runtime.getLastPair();
+    assert.deepEqual(pair, { previous: null, current: baseline });
+    f.state.chat[1].mes = 'Edited current user history';
+    f.state.chat.push({ is_user: false, mes: 'New assistant after N-1 actual request' });
+    const chat = f.state.chat, originals = chat.slice();
+    for (let i = 0; i < 3; i++) {
+        const result = await f.runtime.simulate();
+        assert.deepEqual(result.previous, baseline);
+        assert.deepEqual(result.current.messages, promptFor(chat));
+        assert.equal(result.current.messages.at(-1).content, 'New assistant after N-1 actual request');
+        assert.deepEqual(f.runtime.getLast(), baseline);
+        assert.deepEqual(f.runtime.getLastPair(), pair);
+        assertClean(f, chat, originals);
+        result.previous.messages[0].content = 'Caller mutation does not replace BASE';
+    }
+    const draft = await f.runtime.simulate({ mode: 'draft' });
+    assert.deepEqual(draft.previous, baseline);
+    assert.equal(draft.current.messages.at(-1).content, 'Unsent draft');
+    assert.deepEqual(f.runtime.getLast(), baseline);
+    assert.deepEqual(f.runtime.getLastPair(), pair);
+    await realPost(f, { model: 'N', messages: draft.current.messages });
+    const current = f.runtime.getLast();
+    assert.deepEqual(f.runtime.getLastPair(), { previous: baseline, current });
+    const next = await f.runtime.simulate();
+    assert.deepEqual(next.previous, current, 'N actual becomes BASE for N+1 upcoming');
+    assert.equal(f.stats.transport.length, 2, 'only explicit actual requests delegate');
+});
+
+test('acknowledged real request without any user history remains an actual BASE for empty upcoming', async t => {
     const f = fixture(t, { state: { chat: [{ is_user: false, mes: 'Greeting only' }] } });
     await realPost(f);
-    assert.equal(f.runtime.getLast().kind, 'actual');
-    await assert.rejects(f.runtime.simulate({ mode: 'replay' }), /暂无上次用户发送快照/);
-    assert.equal(f.stats.dryRuns, 0);
+    const baseline = f.runtime.getLast();
+    const result = await f.runtime.simulate();
+    assert.deepEqual(result.previous, baseline);
+    assert.deepEqual(f.runtime.getLastPair(), { previous: null, current: baseline });
 });
 
 // Baseline provenance, acknowledgment, selection, isolation and immutability.
@@ -327,9 +381,13 @@ test('dry-run event and successful simulations never create or overwrite an actu
     const f = fixture(t);
     await f.eventSource.emit(AFTER_DATA, { prompt: [{ role: 'user', content: 'Event without transport' }] }, false);
     assert.equal(f.runtime.getLast(), null);
-    await f.runtime.simulate();
-    assert.equal(f.runtime.getLast(), null);
-    assert.equal(f.runtime.getSimulationBase(), null, 'simulation baseline requires explicit selection');
+    assert.equal(f.runtime.getLastPair(), null);
+    for (let i = 0; i < 3; i++) {
+        const result = await f.runtime.simulate();
+        assert.equal(result.previous, null, 'no invented BASE from previous dry-run');
+        assert.equal(f.runtime.getLast(), null);
+        assert.equal(f.runtime.getLastPair(), null);
+    }
     await realPost(f);
     const baseline = f.runtime.getLast();
     const result = await f.runtime.simulate();
@@ -357,12 +415,13 @@ test('actual baseline overwrite occurs only after successful transport acknowled
     assert.equal(f.runtime.getLast().model, 'new-actual-model');
     assert.equal(f.runtime.getLast().kind, 'actual');
     assert.match(f.runtime.getLast().status, /HTTP 202/);
+    assert.deepEqual(f.runtime.getLastPair(), { previous: initial, current: f.runtime.getLast() });
 });
 
 for (const [label, transport] of [
     ['unsuccessful HTTP response', async () => ({ ok: false, status: 500 })],
     ['transport exception', async () => { throw new Error('fake network failure'); }],
-]) test(`${label} does not overwrite an acknowledged baseline or replay snapshot`, async t => {
+]) test(`${label} does not overwrite an acknowledged actual baseline or pair`, async t => {
     let fail = false;
     const f = fixture(t, { transport: (...args) => fail ? transport(...args) : { ok: true, status: 200 } });
     await realPost(f);
@@ -371,89 +430,157 @@ for (const [label, transport] of [
     f.state.chat[1].mes = 'Failed transport history';
     await realPost(f, { model: 'failed-model', messages: [] }).catch(error => assert.match(error.message, /fake network failure/));
     assert.deepEqual(f.runtime.getLast(), baseline);
-    const replay = await f.runtime.simulate({ mode: 'replay' });
-    assert.equal(replay.current.messages.at(-1).content, 'Last real input');
+    assert.deepEqual(f.runtime.getLastPair(), { previous: null, current: baseline });
+    const upcoming = await f.runtime.simulate();
+    assert.deepEqual(upcoming.previous, baseline);
+    assert.deepEqual(upcoming.current.messages, promptFor(f.state.chat));
 });
 
-test('invalid, auxiliary, and aborted actual requests never replace baseline or its replay history', async t => {
+test('invalid, auxiliary, and aborted actual requests never replace actual baseline or pair', async t => {
     const f = fixture(t);
     await realPost(f);
     const baseline = f.runtime.getLast();
-    f.state.chat[1].mes = 'Should not replace replay';
+    f.state.chat[1].mes = 'Should not replace actual BASE';
     for (const type of ['quiet', 'impersonate']) await realPost(f, { type, messages: [] });
     const controller = new AbortController(); controller.abort();
     await realPost(f, undefined, { signal: controller.signal });
     await f.host.fetch(ENDPOINT, { method: 'POST', body: '{invalid' });
     await realPost(f, { model: 'missing-messages' });
     assert.deepEqual(f.runtime.getLast(), baseline);
-    const replay = await f.runtime.simulate({ mode: 'replay' });
-    assert.equal(replay.current.messages.at(-1).content, 'Last real input');
+    assert.deepEqual(f.runtime.getLastPair(), { previous: null, current: baseline });
+    const upcoming = await f.runtime.simulate();
+    assert.deepEqual(upcoming.previous, baseline);
+    assert.deepEqual(upcoming.current.messages, promptFor(f.state.chat));
 });
 
-test('explicit simulation baseline works without real baseline and returns defensive copies', async t => {
+test('getLastPair defensively clones exactly the last two consecutive acknowledged actual packets', async t => {
     const f = fixture(t);
-    const first = await f.runtime.simulate();
-    f.runtime.setSimulationBase(first.current);
-    const saved = f.runtime.getSimulationBase();
-    assert.equal(saved.kind, 'simulation');
-    assert.deepEqual(saved.messages, first.current.messages);
-    assert.equal(saved.model, first.current.model);
-    assert.equal(saved.source, first.current.source);
-    first.current.messages[0].content = 'Caller mutation';
-    assert.notEqual(f.runtime.getSimulationBase().messages[0].content, 'Caller mutation');
-    saved.messages[0].content = 'Getter mutation';
-    assert.notEqual(f.runtime.getSimulationBase().messages[0].content, 'Getter mutation');
-    const second = await f.runtime.simulate();
-    assert.deepEqual(second.previous, f.runtime.getSimulationBase());
-    assert.equal(f.runtime.getLast(), null);
-    second.previous.messages[0].content = 'Result mutation';
-    assert.notEqual(f.runtime.getSimulationBase().messages[0].content, 'Result mutation');
+    assert.equal(f.runtime.getLastPair(), null);
+    await realPost(f, { model: 'first', messages: [{ role: 'user', content: 'first actual' }], tools: [{ function: { name: 'first-tool' } }] });
+    const first = f.runtime.getLast();
+    assert.deepEqual(f.runtime.getLastPair(), { previous: null, current: first });
+    await realPost(f, { model: 'second', messages: [{ role: 'user', content: 'second actual' }] });
+    const second = f.runtime.getLast();
+    const expected = structuredClone({ previous: first, current: second });
+    assert.deepEqual(f.runtime.getLastPair(), expected);
+    const pair = f.runtime.getLastPair();
+    pair.previous.messages[0].content = 'mutated getter previous';
+    pair.previous.tools[0].function.name = 'mutated tool';
+    pair.current.messages[0].content = 'mutated getter current';
+    second.messages[0].content = 'mutated getLast';
+    assert.deepEqual(f.runtime.getLastPair(), expected);
+    await f.runtime.simulate();
+    assert.deepEqual(f.runtime.getLastPair(), expected);
+    await realPost(f, { model: 'third', messages: [{ role: 'user', content: 'third actual' }] });
+    assert.equal(f.runtime.getLastPair().previous.model, 'second');
+    assert.equal(f.runtime.getLastPair().current.model, 'third');
 });
 
-test('real baseline always takes priority over explicitly selected simulated baseline', async t => {
+test('BASE/pair are chat-scoped, never bridge a different actual chat, and clear removes both', async t => {
     const f = fixture(t);
-    const simulated = await f.runtime.simulate();
-    f.runtime.setSimulationBase(simulated.current);
-    await realPost(f);
-    const actual = f.runtime.getLast();
-    const next = await f.runtime.simulate();
-    f.runtime.setSimulationBase(next.current);
-    const again = await f.runtime.simulate();
-    assert.deepEqual(next.previous, actual);
-    assert.deepEqual(again.previous, actual);
-    assert.equal(f.runtime.getSimulationBase().kind, 'simulation');
-    assert.deepEqual(f.runtime.getLast(), actual);
-});
-
-for (const [label, packet] of [
-    ['null', null], ['actual packet', { kind: 'actual', key: '[0,null,"chat-1"]', messages: [] }],
-    ['another chat', { kind: 'simulation', key: '[0,null,"different"]', messages: [] }],
-    ['invalid messages', { kind: 'simulation', key: '[0,null,"chat-1"]', messages: null }],
-]) test(`setSimulationBase rejects ${label} without altering baseline`, async t => {
-    const f = fixture(t);
-    const first = await f.runtime.simulate();
-    f.runtime.setSimulationBase(first.current);
-    const saved = f.runtime.getSimulationBase();
-    assert.throws(() => f.runtime.setSimulationBase(packet), /模拟结果|messages/);
-    assert.deepEqual(f.runtime.getSimulationBase(), saved);
-});
-
-test('baselines are isolated by chat key and clear removes real, simulation, and replay state', async t => {
-    const f = fixture(t);
-    await realPost(f);
-    const simulated = await f.runtime.simulate();
-    f.runtime.setSimulationBase(simulated.current);
+    await realPost(f, { model: 'chat-1-first', messages: [] });
+    await realPost(f, { model: 'chat-1-second', messages: [] });
+    const oldPair = f.runtime.getLastPair();
     f.state.chatId = 'other-chat';
     assert.equal(f.runtime.getLast(), null);
-    assert.equal(f.runtime.getSimulationBase(), null);
-    await assert.rejects(f.runtime.simulate({ mode: 'replay' }), /暂无上次用户发送快照/);
+    assert.equal(f.runtime.getLastPair(), null);
+    assert.equal((await f.runtime.simulate()).previous, null);
     f.state.chatId = 'chat-1';
-    assert.ok(f.runtime.getLast());
-    assert.ok(f.runtime.getSimulationBase());
+    assert.deepEqual(f.runtime.getLastPair(), oldPair);
+    f.state.chatId = 'other-chat';
+    await realPost(f, { model: 'other-chat-first', messages: [] });
+    assert.deepEqual(f.runtime.getLastPair(), { previous: null, current: f.runtime.getLast() });
+    f.state.chatId = 'chat-1';
+    assert.equal(f.runtime.getLast(), null);
+    assert.equal(f.runtime.getLastPair(), null);
+    await realPost(f, { model: 'chat-1-returned', messages: [] });
+    assert.equal(f.runtime.getLastPair().previous, null, 'no stale non-consecutive packet restored from chat-1');
     f.runtime.clear();
     assert.equal(f.runtime.getLast(), null);
-    assert.equal(f.runtime.getSimulationBase(), null);
-    await assert.rejects(f.runtime.simulate({ mode: 'replay' }), /暂无上次用户发送快照/);
+    assert.equal(f.runtime.getLastPair(), null);
+    assert.equal((await f.runtime.simulate()).previous, null);
+});
+
+test('out-of-order responses fill latest acknowledged N-1/N pair without regressing BASE; clear invalidates older and newer pending acks', async t => {
+    const responses = Array.from({ length: 6 }, deferred);
+    let index = 0, delayed = false;
+    const f = fixture(t, { transport: () => delayed ? responses[index++].promise : { ok: true, status: 200 } });
+    await realPost(f, { model: 'acknowledged BASE', messages: [] });
+    const base = f.runtime.getLast();
+    delayed = true;
+    const oldest = realPost(f, { model: 'oldest pending N-2', messages: [] });
+    const older = realPost(f, { model: 'older pending N-1', messages: [] });
+    const newer = realPost(f, { model: 'newest pending N', messages: [] });
+    await tick();
+    responses[2].resolve({ ok: true, status: 200 });
+    await newer;
+    const newest = f.runtime.getLast();
+    assert.deepEqual(f.runtime.getLastPair(), { previous: base, current: newest });
+    responses[1].resolve({ ok: true, status: 202 });
+    await older;
+    const newestPair = f.runtime.getLastPair();
+    assert.equal(newestPair.previous.model, 'older pending N-1');
+    assert.match(newestPair.previous.status, /HTTP 202/);
+    assert.deepEqual(newestPair.current, newest);
+    assert.deepEqual(f.runtime.getLast(), newest, 'late N-1 acknowledgment must not change BASE');
+    responses[0].resolve({ ok: true, status: 200 });
+    await oldest;
+    assert.deepEqual(f.runtime.getLastPair(), newestPair, 'even older ack cannot displace N-1');
+    const preclearOlder = realPost(f, { model: 'cleared older pending', messages: [] });
+    const preclearNewer = realPost(f, { model: 'cleared newer pending', messages: [] });
+    await tick();
+    f.runtime.clear();
+    const afterClear = realPost(f, { model: 'fresh after clear', messages: [] });
+    await tick();
+    responses[5].resolve({ ok: true, status: 200 });
+    await afterClear;
+    const freshPair = f.runtime.getLastPair();
+    assert.equal(freshPair.previous, null);
+    responses[4].resolve({ ok: true, status: 200 });
+    responses[3].resolve({ ok: true, status: 200 });
+    await Promise.all([preclearOlder, preclearNewer]);
+    assert.deepEqual(f.runtime.getLastPair(), freshPair, 'cleared candidates cannot fill fresh predecessor either');
+    assert.deepEqual(f.runtime.getLast(), freshPair.current);
+});
+
+for (const succeeds of [false, true])
+    test(`out-of-order first two actual responses ${succeeds ? 'fill an acknowledged predecessor' : 'do not invent a failed predecessor'}`, async t => {
+        const responses = [deferred(), deferred()];
+        let index = 0;
+        const f = fixture(t, { transport: () => responses[index++].promise });
+        const older = realPost(f, { model: 'older', messages: [] });
+        const newer = realPost(f, { model: 'newer', messages: [] });
+        await tick();
+        responses[1].resolve({ ok: true, status: 200 });
+        await newer;
+        const current = f.runtime.getLast();
+        assert.deepEqual(f.runtime.getLastPair(), { previous: null, current });
+        responses[0].resolve({ ok: succeeds, status: succeeds ? 200 : 500 });
+        await older;
+        assert.deepEqual(f.runtime.getLast(), current);
+        assert.equal(f.runtime.getLastPair().previous?.model ?? null, succeeds ? 'older' : null);
+        assert.deepEqual(f.runtime.getLastPair().current, current);
+    });
+
+test('asynchronous Request body read freezes chat attribution and cannot bridge a new-chat pair', async t => {
+    const bodyGate = deferred();
+    const f = fixture(t);
+    await realPost(f, { model: 'initial old-chat', messages: [] });
+    const stream = new ReadableStream({ async start(controller) {
+        await bodyGate.promise;
+        controller.enqueue(new TextEncoder().encode('{"model":"late old-chat","messages":[]}'));
+        controller.close();
+    } });
+    const old = f.host.fetch(new Request(`${f.host.location.origin}${ENDPOINT}`, { method: 'POST', body: stream, duplex: 'half' }));
+    await tick();
+    f.state.chatId = 'new-chat';
+    await realPost(f, { model: 'new-chat acknowledged', messages: [] });
+    const pair = f.runtime.getLastPair();
+    assert.equal(pair.previous, null);
+    bodyGate.resolve();
+    await old;
+    assert.deepEqual(f.runtime.getLastPair(), pair);
+    assert.deepEqual(f.runtime.getLast(), pair.current);
 });
 
 // Verified dry-run interface and output validation. No normal-generate fallback.
@@ -607,6 +734,28 @@ for (const [label, input, init, pattern] of [
     assertClean(f, chat, originals);
 });
 
+for (const [input, init, pattern] of [
+    [ENDPOINT, { method: 'POST', body: '{}' }, /意外尝试调用模型/],
+    ['https://provider.invalid/v1/chat/completions', { method: 'POST', body: '{}' }, /额外模型或外部/],
+    ['/api/chats/save', { method: 'POST', body: '{}' }, /写入或不支持/],
+]) test(`draft denies ${input} without model transport or persisted writes and restores originals`, async t => {
+    const f = fixture(t, { run: async (_ctx, { host }) => { await host.fetch(input, init); } });
+    const chat = f.state.chat, originals = chat.slice(), values = structuredClone(chat);
+    await assert.rejects(f.runtime.simulate({ mode: 'draft' }), pattern);
+    await settle(f);
+    assert.equal(f.stats.inputReads, 1);
+    assert.equal(f.stats.attachmentReads, 1);
+    assert.equal(f.stats.ordinaryGenerates, 0);
+    assert.equal(f.stats.userSends, 0);
+    assert.equal(f.stats.transport.length, 0);
+    assertOriginals(chat, originals);
+    assert.deepEqual(chat, values);
+    assert.equal(f.runtime.getLast(), null);
+    assert.equal(f.runtime.getLastPair(), null);
+    assert.equal(f.runtime.isBusy(), false);
+    assert.equal(f.eventSource.listenerCount(AFTER_DATA), 0);
+});
+
 test('local tokenizer, worldinfo/get and benign same-origin GET requests delegate and simulation succeeds', async t => {
     const calls = [
         ['/api/tokenizers/openai/count', { method: 'POST', body: '{}' }],
@@ -680,7 +829,6 @@ for (const stopThrows of [false, true])
             assert.equal(f.eventSource.listenerCount(AFTER_DATA), 1);
             await assert.rejects(f.runtime.simulate(), /正在生成\/预览/);
             await assert.rejects(f.runtime.captureCurrent(), /正在生成\/预览/);
-            assert.throws(() => f.runtime.setSimulationBase({}), /请等待模拟结束/);
             await assert.rejects(f.runtime.undoWrittenMessage(), /流程尚未结束/);
             beforeData.resolve();
             await f.cleanupStarted.promise;
@@ -730,7 +878,7 @@ test('destroy retains guard, runtime ownership and clones until cleanup; fresh r
         assertClean(f, chat, originals);
         assert.equal(f.host.fetch, f.originalFetch);
         assert.equal(f.runtime.getLast(), null);
-        assert.equal(f.runtime.getSimulationBase(), null);
+        assert.equal(f.runtime.getLastPair(), null);
         const fresh = createExactCapture({ ...f.config, dryRunGenerate: async ctx => {
             await f.eventSource.emit(AFTER_DATA, { prompt: promptFor(ctx.chat) }, true);
         } });
@@ -745,14 +893,16 @@ test('destroy retains guard, runtime ownership and clones until cleanup; fresh r
 test('destroy after success restores fake fetch; retained wrapper is inert and cannot recreate baseline', async t => {
     const f = fixture(t);
     await realPost(f);
-    f.runtime.setSimulationBase((await f.runtime.simulate()).current);
+    await realPost(f, { model: 'second actual', messages: [] });
+    await f.runtime.simulate();
+    assert.ok(f.runtime.getLastPair().previous);
     const wrapper = f.host.fetch;
     f.runtime.destroy();
     assert.equal(f.host.fetch, f.originalFetch);
     await wrapper(ENDPOINT, { method: 'POST', body: '{"messages":[]}' });
-    assert.equal(f.stats.transport.length, 2);
+    assert.equal(f.stats.transport.length, 3);
     assert.equal(f.runtime.getLast(), null);
-    assert.equal(f.runtime.getSimulationBase(), null);
+    assert.equal(f.runtime.getLastPair(), null);
     await assert.rejects(f.runtime.simulate(), /已关闭/);
 });
 
@@ -975,32 +1125,27 @@ test('uncloneable extension prompts restores already-copied metadata and chat be
     assert.equal(f.state.extensionPrompts.original, promptEntry);
 });
 
-for (const type of ['swipe', 'continue'])
-    test(`acknowledged ${type} request may replace actual baseline but is ineligible for normal-user replay`, async t => {
+for (const type of ['swipe', 'continue', 'normal'])
+    test(`acknowledged ${type} actual updates BASE/pair for upcoming full current history`, async t => {
         const f = fixture(t);
         await realPost(f);
+        const previous = f.runtime.getLast();
         await realPost(f, { type, model: `${type}-model`, messages: [{ role: 'user', content: type }] });
-        assert.equal(f.runtime.getLast().model, `${type}-model`);
-        await assert.rejects(f.runtime.simulate({ mode: 'replay' }), /暂无上次用户发送快照/);
-        assert.equal(f.stats.dryRuns, 0);
+        const actual = f.runtime.getLast();
+        assert.equal(actual.model, `${type}-model`);
+        assert.deepEqual(f.runtime.getLastPair(), { previous, current: actual });
         const empty = await f.runtime.simulate();
-        assert.equal(empty.previous.model, `${type}-model`);
+        assert.deepEqual(empty.previous, actual);
+        assert.deepEqual(empty.current.messages, promptFor(f.state.chat));
     });
 
-test('user-ending explicit normal dispatch is eligible for replay', async t => {
-    const f = fixture(t);
-    await realPost(f, { type: 'normal', model: 'explicit-normal', messages: [] });
-    const replay = await f.runtime.simulate({ mode: 'replay' });
-    assert.equal(replay.previous.model, 'explicit-normal');
-    assert.equal(replay.current.messages.at(-1).content, 'Last real input');
-});
-
-test('normal request dispatched after an assistant is not a last-user send snapshot', async t => {
+test('normal actual dispatched after an assistant remains BASE, without inventing a prior user snapshot', async t => {
     const f = fixture(t);
     await f.host.fetch(ENDPOINT, { method: 'POST', body: JSON.stringify({ type: 'normal', messages: [] }) });
-    assert.equal(f.runtime.getLast().kind, 'actual');
-    await assert.rejects(f.runtime.simulate({ mode: 'replay' }), /暂无上次用户发送快照/);
-    assert.equal(f.stats.dryRuns, 0);
+    const actual = f.runtime.getLast();
+    assert.equal(actual.kind, 'actual');
+    assert.deepEqual(f.runtime.getLastPair(), { previous: null, current: actual });
+    assert.deepEqual((await f.runtime.simulate()).previous, actual);
 });
 
 test('same host reuses runtime and concurrent simulation shares busy guard without second dry-run', async t => {
@@ -1011,7 +1156,7 @@ test('same host reuses runtime and concurrent simulation shares busy guard witho
     const simulation = f.runtime.simulate();
     try {
         await f.started.promise;
-        await assert.rejects(second.simulate({ mode: 'replay' }), /正在生成\/预览/);
+        await assert.rejects(second.simulate({ mode: 'draft' }), /正在生成\/预览/);
         assert.equal(f.stats.dryRuns, 1);
         beforeData.resolve();
         await simulation;

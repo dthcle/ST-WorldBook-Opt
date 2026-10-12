@@ -3,7 +3,7 @@
 // New UI uses native dry-run (third Generate argument), never the old ordinary-send preview.
 // Dry-run snapshots are explicitly NOT the final transport: several ordinary handlers are skipped.
 // Legacy captureCurrent remains an internal compatibility API; it may persist a user message.
-import { replaySnapshot, useReplayChat, useRecordCopies } from './request-snapshot.js';
+import { useReplayChat, useRecordCopies } from './request-snapshot.js';
 const runtimes = new WeakMap();
 const ENDPOINT = '/api/backends/chat-completions/generate';
 const MAX_BODY_CHARS = 16 * 1024 * 1024;
@@ -38,7 +38,7 @@ export function createExactCapture({ getContext, host = globalThis, isGenerating
     if (runtimes.has(host)) return runtimes.get(host);
     if (typeof getContext !== 'function' || typeof host.fetch !== 'function' || !host.location?.origin) throw new Error('当前环境缺少标准 fetch 请求捕获接口。');
     if (typeof stopGeneration !== 'function') throw new Error('当前环境缺少停止生成接口。');
-    let last = null, replay = null, simulationBase = null, preview = null, undo = null, disabled = false, sequence = 0, newestAck = 0;
+    let last = null, lastPair = null, preview = null, undo = null, disabled = false, sequence = 0, newestAck = 0, ackFloor = 0;
     let topWrapper = null, topDelegate = null;
     const stop = session => {
         if (session.stopped) return;
@@ -76,7 +76,6 @@ export function createExactCapture({ getContext, host = globalThis, isGenerating
             // Freeze attribution before any asynchronous Request.clone().text() read.
             const dispatchContext = primary ? getContext() : null;
             const dispatchKey = primary ? chatKey(dispatchContext) : null;
-            const dispatchReplay = primary && !preview && dispatchContext?.chat?.at(-1)?.is_user ? replaySnapshot(dispatchContext) : null;
             const sentAt = primary ? now() : null;
             const attemptId = primary ? ++sequence : null;
             const session = preview;
@@ -116,10 +115,20 @@ export function createExactCapture({ getContext, host = globalThis, isGenerating
             const response = await delegate.call(host,input,options);
             // A ready event is not a send. Only an actual transport with a successful ST response
             // establishes the baseline; streaming completion/upstream billing is NOT inferred.
-            if (!disabled && candidate && response.ok && !(options?.signal ?? input?.signal)?.aborted && candidate.id > newestAck) {
-                newestAck = candidate.id;
-                last = { ...candidate, kind: 'actual', status: `酒馆后端已响应 HTTP ${response.status}` };
-                replay = candidate.generationType === 'normal' ? dispatchReplay : null;
+            if (!disabled && candidate && response.ok && !(options?.signal ?? input?.signal)?.aborted && candidate.id > ackFloor) {
+                const actual = { ...candidate, kind: 'actual', status: `酒馆后端已响应 HTTP ${response.status}` };
+                if (candidate.id > newestAck) {
+                    newestAck = candidate.id;
+                    // Never invent a predecessor or combine packets from different chats.
+                    const previous = last?.key === candidate.key ? last : null;
+                    last = actual;
+                    lastPair = { previous, current: last };
+                } else if (lastPair?.current.key === candidate.key && candidate.id < lastPair.current.id
+                    && candidate.id > (lastPair.previous?.id ?? ackFloor)) {
+                    // A late N-1 acknowledgment may fill the predecessor of current N,
+                    // but must never replace/regress the latest actual BASE.
+                    lastPair = { previous: actual, current: last };
+                }
             }
             return response;
         };
@@ -130,13 +139,8 @@ export function createExactCapture({ getContext, host = globalThis, isGenerating
         getLast() { return last?.key === chatKey(getContext()) ? structuredClone(last) : null; },
         isBusy() { return preview !== null; },
         wroteChatMessage() { return Boolean(undo); },
-        getSimulationBase() { return simulationBase?.key === chatKey(getContext()) ? structuredClone(simulationBase) : null; },
-        setSimulationBase(packet) {
-            if (preview || isGenerating()) throw new Error('请等待模拟结束。');
-            if (packet?.kind !== 'simulation' || packet.key !== chatKey(getContext())) throw new Error('只能使用当前聊天的模拟结果作为模拟基准。');
-            simulationBase = { ...selectPayload({ ...packet, chat_completion_source: packet.source }), key: packet.key, kind: 'simulation', capturedAt: packet.capturedAt };
-        },
-        clear() { last = null; replay = null; simulationBase = null; newestAck = ++sequence; /* Preserve legacy safe recovery. */ },
+        getLastPair() { return lastPair?.current.key === chatKey(getContext()) ? structuredClone(lastPair) : null; },
+        clear() { last = null; lastPair = null; ackFloor = newestAck = ++sequence; /* Preserve legacy safe recovery. */ },
         simulate({ mode = 'empty' } = {}) {
             if (disabled) return Promise.reject(new Error('捕获器已关闭。'));
             if (preview || isGenerating()) return Promise.reject(new Error('正在生成/预览，请等待流程结束。'));
@@ -144,16 +148,26 @@ export function createExactCapture({ getContext, host = globalThis, isGenerating
             if (ctx.mainApi !== 'openai') return Promise.reject(new Error('仅支持标准 Chat Completion 提示词模拟。'));
             if (ctx.groupId != null && ctx.groupId !== '') return Promise.reject(new Error('本版不模拟群聊。'));
             if (ctx.characterId == null || !Array.isArray(ctx.chat)) return Promise.reject(new Error('请先打开单人角色聊天。'));
-            if (!['empty', 'replay'].includes(mode)) return Promise.reject(new Error('未知模拟方式。'));
+            if (!['empty', 'draft'].includes(mode)) return Promise.reject(new Error('未知模拟方式。'));
             const event = ctx.eventTypes?.GENERATE_AFTER_DATA;
             if (typeof dryRunGenerate !== 'function' || !event || typeof ctx.eventSource?.on !== 'function' || typeof ctx.eventSource?.removeListener !== 'function') {
                 return Promise.reject(new Error('当前酒馆缺少已验证的 dry-run 接口；不会退回普通发送。'));
             }
-            const previous = runtime.getLast() ?? runtime.getSimulationBase();
-            if (mode === 'replay' && (!runtime.getLast() || !replay)) return Promise.reject(new Error('暂无上次用户发送快照，请先用空文本模拟；不会自动发送请求。'));
-            // Empty means append nothing: ST dry-run ignores the composer and send_if_empty.
-            // Even empty mode works on copies, because ST substitutes the first greeting in-place.
-            const snapshot = mode === 'replay' ? replay : { chat: ctx.chat };
+            const previous = runtime.getLast(); // N-1 actual request only, never an earlier simulation.
+            // Empty appends nothing and never reads the composer or pending attachments.
+            // Draft reads once, without normal user-send regex/macros or any persisted send.
+            const snapshot = { chat: ctx.chat };
+            if (mode === 'draft') {
+                try {
+                    const draft = String(getInput());
+                    if (draft.trimStart().startsWith('/')) throw new Error('草稿模拟不执行斜杠命令，请输入普通文本。');
+                    if (hasAttachment()) throw new Error('草稿模拟不上传新附件，请先移除待发送附件。');
+                    snapshot.chat = [...ctx.chat, { name: ctx.name1 ?? 'User', is_user: true, is_system: false,
+                        mes: draft, send_date: now(), extra: {} }];
+                } catch (error) { return Promise.reject(error); }
+            }
+            // Work on cloned full current history, because ST substitutes greetings in-place.
+            // Only this temporary snapshot receives the draft message; originals are restored.
             let restore, restoreMetadata = () => {}, restorePrompts = () => {};
             try {
                 restore = useReplayChat(ctx.chat, snapshot);
@@ -201,8 +215,10 @@ export function createExactCapture({ getContext, host = globalThis, isGenerating
                             key: session.key, kind: 'simulation', mode, capturedAt: now() };
                         session.callerSettled = true;
                         resolve({ previous, current, wroteMessage: false, warnings: [
-                            '这是 dry-run 提示词快照：不读取输入框，不追加空用户消息，不调用模型；聊天原消息对象已恢复。',
-                            mode === 'replay' ? '重放的是上次请求时截至最后一条用户消息的历史快照，不包含随后生成的回复。' : '空文本模拟使用当前聊天历史，没有加入新文本；它不是实际发送一个空消息。',
+                            '这是 dry-run 提示词快照，不调用模型；聊天原消息对象已恢复，输入框保持不变。',
+                            mode === 'draft'
+                                ? '草稿模拟只读取一次输入框，按原始普通文本在当前完整聊天的临时副本中追加用户消息；不运行正常用户发送的正则/宏处理，因此只是近似预览。'
+                                : '空文本模拟使用当前完整聊天历史，不读取输入框或待发送附件，不加入新用户消息；它不是实际发送一个空消息。',
                             'dry-run 不执行全部普通发送拦截器/SETTINGS_READY 后处理、系统消息合并；世界书粘附/冷却的判断也不同。与真实基准的差异可能包含这些流程差异，不保证等于最终 API 正文。',
                             '宏、世界书和第三方插件仍可能更新私有状态；标准写入 fetch 已阻止，但这不是任意第三方代码的安全沙箱。',
                         ] });
@@ -214,7 +230,7 @@ export function createExactCapture({ getContext, host = globalThis, isGenerating
         },
         destroy() {
             if (disabled) return;
-            disabled = true; last = null; replay = null; simulationBase = null;
+            disabled = true; last = null; lastPair = null;
             if (preview) { rejectSession(preview,new Error('捕获器已关闭，预览已停止。')); stop(preview); }
             else removePatches();
         },

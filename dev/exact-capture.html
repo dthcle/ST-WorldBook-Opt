@@ -2,8 +2,8 @@
 <html lang="zh-CN" data-wbo-preview><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>请求差异：不动输入框模拟回归</title><link rel="stylesheet" href="../style.css">
 <style>body{background:#111723;color:#e4e8f0;font:16px system-ui;margin:24px}#extensionsMenu{max-width:400px;border:1px solid #445;margin:16px 0;font-size:17.6px}#extensionsMenu>.extension_container>div{padding:5px;display:flex;gap:10px;align-items:baseline;cursor:pointer}.extensionsMenuExtensionButton{width:20px}textarea{width:min(700px,100%);height:80px;background:#222c3b;color:inherit}#checks{font-size:13px}body.compact{max-width:360px;margin:8px}</style>
-<h1>原生 dry-run 回归（内存模拟）</h1><p>模拟不写入聊天、不读取输入框、不增加模型传输；晚处理监听器完成后才读取消息。</p>
-<label for="send_textarea">你的草稿（模拟后必须保持原样）</label><br><textarea id="send_textarea">不要动我的草稿 /send 保持光标</textarea>
+<h1>真实 N−1→下一次 N 回归（内存模拟）</h1><p>BASE 只来自正常发送；空文本不读取草稿，只读草稿不改动输入框。预览不增加模型传输，真实发送后可以查看最近真实请求对。</p>
+<label for="send_textarea">你的草稿（模拟后必须保持原样）</label><br><textarea id="send_textarea">第 N 次：去海边（不要清空我的草稿）</textarea>
 <label for="world">模拟世界设定</label><input id="world" value="原始世界设定">
 <div id="extensionsMenu"></div><p id="checks" role="status"></p><button id="actual">模拟一次正常发送（假的传输）</button>
 <script type="module">
@@ -29,10 +29,11 @@ const ctx=()=>({...state,mainApi:'openai',name1:'用户',eventSource:source,even
 const runtime=createExactCapture({host,getContext:ctx,isGenerating:()=>phase!=='idle',stopGeneration:()=>{stopped++},dryRunGenerate:c=>c.generate('normal',{},true),getModel:()=> 'mock-model',getSource:()=> 'custom',getInput:()=>{composerReads++;return document.getElementById('send_textarea').value}});
 // Late mutations must be included. No real provider endpoint is used by this fixture.
 source.on('after',async data=>{await Promise.resolve();data.prompt[0].content+='\n晚处理完成';});
-async function actual(){await ctx().generate('normal');state.chat.push({name:'角色',is_user:false,mes:'后来收到的回复'});}
+let settled=[];
+async function actual(){await ctx().generate('normal');state.chat.push({name:'角色',is_user:false,mes:'后来收到的回复'});settled=state.chat.slice();}
 if(!query.has('nobaseline'))await actual();
-const settled=state.chat.slice();const draft=document.getElementById('send_textarea').value;
+settled=state.chat.slice();const draft=document.getElementById('send_textarea').value;
 await initDiagnostics(async()=>runtime);document.getElementById('actual').onclick=actual;
-function report(){const last=runtime.getLast();document.getElementById('checks').textContent=`模型传输 ${delegated}（模拟不应增加） · 停止 ${stopped} · 清理 ${cleaned?'PASS':'idle'} · 基线 ${last?.messages.length??0} 条 · 输入读取 ${composerReads} · 草稿 ${document.getElementById('send_textarea').value===draft?'PASS':'CHANGED'} · 聊天身份 ${settled.every((m,i)=>state.chat[i]===m)&&state.chat.length===settled.length?'PASS':'CHANGED'}`;}
+function report(){const last=runtime.getLast();document.getElementById('checks').textContent=`模型传输 ${delegated}（模拟不应增加） · 停止 ${stopped} · 清理 ${cleaned?'PASS':'idle'} · BASE ${last?.messages.length??0} 条 · 真实请求对 ${runtime.getLastPair()?.previous?'READY':'不足两次'} · 输入读取 ${composerReads} · 草稿 ${document.getElementById('send_textarea').value===draft?'PASS':'CHANGED'} · 聊天身份 ${settled.every((m,i)=>state.chat[i]===m)&&state.chat.length===settled.length?'PASS':'CHANGED'}`;}
 setInterval(report,300);report();
 </script></html>
