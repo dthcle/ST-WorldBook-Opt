@@ -27,7 +27,7 @@ export function buildSettingsDrawer(actions) {
     content.className = 'inline-drawer-content';
     content.style.display = 'none';
     content.append(
-        Object.assign(document.createElement('p'), { className: 'wbo-muted', textContent: '逐条对比、手动应用、自动备份；并提供不发出 API 请求的请求输入差异捕获。' }),
+        Object.assign(document.createElement('p'), { className: 'wbo-muted', textContent: '逐条对比、手动应用、自动备份；记录最近一次请求，并提供不动输入框的空文本 dry-run 差异模拟。' }),
     );
     const row = document.createElement('div');
     row.className = 'wbo-toolbar';
@@ -62,6 +62,31 @@ async function init() {
     container.append(drawer);
 }
 
+/** Native ST wand row: div + extensionsMenuExtensionButton inherit the menu's theme sizing. */
+export function buildWandMenuEntry(run) {
+    const entry = document.createElement('div');
+    entry.id = 'wbo-request-diff';
+    entry.className = 'list-group-item wbo-wand-button interactable';
+    entry.setAttribute('role', 'button');
+    entry.tabIndex = 0;
+    const icon = document.createElement('div');
+    // Included in SillyTavern's bundled Font Awesome 6.5.2 (two bars with opposing arrows).
+    icon.className = 'fa-solid fa-arrows-left-right-to-line extensionsMenuExtensionButton';
+    icon.setAttribute('aria-hidden', 'true');
+    const label = document.createElement('span');
+    label.textContent = '请求输入差异';
+    entry.append(icon, label);
+    entry.addEventListener('click', run);
+    entry.addEventListener('keydown', event => {
+        if (!['Enter', ' '].includes(event.key) || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+        event.preventDefault();
+        // ST also delegates Enter for .interactable controls; don't activate twice.
+        event.stopPropagation();
+        if (!event.repeat) entry.click();
+    });
+    return entry;
+}
+
 /** Wand (magic wand) menu entry. */
 export async function initDiagnostics(factory = installExactCapture) {
     if (initDiagnostics.runtime) return initDiagnostics.runtime;
@@ -74,15 +99,8 @@ export async function initDiagnostics(factory = installExactCapture) {
         if (!document.getElementById('wbo-request-diff')) {
             const container = document.createElement('div');
             container.className = 'extension_container';
-            const button = document.createElement('button');
-            button.type = 'button'; button.id = 'wbo-request-diff'; button.className = 'list-group-item wbo-wand-button';
-            const icon = document.createElement('i');
-            icon.className = 'fa-solid fa-magnifying-glass'; icon.setAttribute('aria-hidden', 'true');
-            const label = document.createElement('span');
-            label.textContent = '请求输入差异';
-            button.append(icon, label);
-            button.addEventListener('click', () => { if (!document.querySelector('.wbo-overlay')) mountRequestDiff(runtime); });
-            container.append(button); menu.append(container);
+            const entry = buildWandMenuEntry(() => { if (!document.querySelector('.wbo-overlay')) mountRequestDiff(runtime); });
+            container.append(entry); menu.append(container);
         }
         return true;
     }

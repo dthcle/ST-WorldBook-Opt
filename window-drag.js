@@ -25,6 +25,9 @@ export function readGeometry(panel) {
 function pointerGesture(host, element, onStart, onMove, onEnd) {
     let active = false;
     const down = event => {
+        // Never capture a header button's pointer: doing so retargets click to
+        // the header and makes Close unclickable on mouse/touch devices.
+        if (event.target?.closest?.('button,input,select,a,textarea,[contenteditable="true"]')) return;
         if (event.button !== undefined && event.button !== 0) return;
         active = true;
         if (element.setPointerCapture && event.pointerId !== undefined) {

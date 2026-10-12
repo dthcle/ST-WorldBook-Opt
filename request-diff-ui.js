@@ -1,10 +1,9 @@
 import { compareInputs } from './prompt-diff.js';
-import { applyGeometry, initialGeometry, makeMovable, readGeometry } from './window-drag.js';
-import { defaultLayout, clampLayout } from './window-layout.js';
+import { applyGeometry, initialGeometry, makeMovable } from './window-drag.js';
 
 /** Compare only when a real previous request exists; otherwise there is nothing to diff. */
 export function buildComparison(previous, current) {
-    if (!current || !Array.isArray(current.messages)) throw new Error('捕获结果缺少消息列表');
+    if (!current || !Array.isArray(current.messages)) throw new Error('模拟结果缺少消息列表');
     if (!previous || !Array.isArray(previous.messages)) return null;
     return compareInputs(previous.messages, current.messages);
 }
@@ -76,7 +75,7 @@ export function lineRows(lines, field, showEqual) {
     }
     const visible = all.map((row, index) => ({ row, index })).filter(item => keep.has(item.index));
     const container = node('div', undefined, 'wbo-lines');
-    container.append(node('p', '逐行差异：上次 ' + lines.beforeLineCount + ' 行 → 捕获 ' + lines.afterLineCount + ' 行；删除 ' + lines.deleteCount + ' 行、新增 ' + lines.insertCount + ' 行，相同行 ' + lines.matched + ' 行。替换按删除+新增统计，区段只是展示对齐，不是唯一标准答案。', 'wbo-muted'));
+    container.append(node('p', '逐行差异：上次 ' + lines.beforeLineCount + ' 行 → 模拟 ' + lines.afterLineCount + ' 行；删除 ' + lines.deleteCount + ' 行、新增 ' + lines.insertCount + ' 行，相同行 ' + lines.matched + ' 行。替换按删除+新增统计，区段只是展示对齐，不是唯一标准答案。', 'wbo-muted'));
     if (lines.budgetExceeded) container.append(node('p', '文本对齐预算已耗尽，部分区段使用近似对齐；不要把展示行数当作最小编辑距离。', 'wbo-warning'));
     if (lines.hunks.length) {
         const ranges = lines.hunks.slice(0, 6).map(hunk => {
@@ -86,7 +85,7 @@ export function lineRows(lines, field, showEqual) {
             if (hunk.changes) parts.push('改 ' + hunk.changes);
             if (hunk.deletes) parts.push('删 ' + hunk.deletes);
             if (hunk.inserts) parts.push('增 ' + hunk.inserts);
-            return '上次 ' + before + ' 行 → 捕获 ' + after + ' 行（' + parts.join('、') + '）';
+            return '上次 ' + before + ' 行 → 模拟 ' + after + ' 行（' + parts.join('、') + '）';
         });
         container.append(node('p', '差异区段：' + ranges.join('；') + (lines.hunks.length > 6 ? '；…共 ' + lines.hunks.length + ' 段' : '') + '。', 'wbo-muted'));
     }
@@ -127,7 +126,7 @@ export function lineRows(lines, field, showEqual) {
 /** Fallback for fields too large to line-diff: side-by-side view. */
 export function sideBySide(field) {
     const columns = node('div', undefined, 'wbo-diff');
-    const sides = [['上次实际请求', field.beforeText, field.beforeChanged], ['当前捕获', field.afterText, field.afterChanged]];
+    const sides = [['对比基准', field.beforeText, field.beforeChanged], ['本次模拟', field.afterText, field.afterChanged]];
     for (const side of sides) {
         const column = node('div');
         column.append(node('small', side[0]), markedText(side[1], side[2]));
@@ -143,7 +142,7 @@ export function mountRequestDiff(runtime, target = document.body, host = globalT
     panel.setAttribute('aria-modal', 'true');
     panel.setAttribute('aria-label', '请求输入差异');
     const opener = document.activeElement;
-    let busy = false, result = null, diff = null, userMoved = false;
+    let busy = false, result = null, diff = null;
     const viewportDetach = trackViewport(overlay, host);
     const geometry = initialGeometry(host);
     applyGeometry(panel, geometry);
@@ -155,12 +154,17 @@ export function mountRequestDiff(runtime, target = document.body, host = globalT
     resizeHandle.setAttribute('aria-label', '调整窗口大小');
     const dragDetach = makeMovable(panel, host, header, resizeHandle);
 
-    const intro = node('p', '上次酒馆后端成功响应的实际请求，与当前输入组装后的最终 fetch 正文对比。预览请求在转发前截断，不只是依赖停止按钮。', 'wbo-muted');
-    const warning = node('p', '仅支持标准浏览器 Chat Completion fetch 通道。组装会运行宏/插件，并可能将输入保存为用户消息，不是无副作用模拟；撤回不能回滚宏或插件状态。预览期间不要发送或切换聊天。', 'wbo-warning');
+    const intro = node('p', '每次正常发送自动覆盖最近一次请求记录。可重放上次用户内容，或模拟空文本：不读取、不清空输入框，不新增聊天消息，也不调用模型。没有真实记录时，可把一次模拟保存为基准后继续对比。', 'wbo-muted');
+    const warning = node('p', '模拟使用酒馆的 dry-run 提示词组装，结果不冒充最终发送正文：仅真实发送才能经过全部发送前处理。宏、世界书和插件仍可能产生副作用；模拟期间不要发送或切换聊天。', 'wbo-warning');
     const baseline = node('p', undefined, 'wbo-muted');
     const status = node('p', undefined, 'wbo-status');
     status.setAttribute('role', 'status');
     const toolbar = node('div', undefined, 'wbo-toolbar');
+    const mode = node('select');
+    mode.setAttribute('aria-label', '模拟内容');
+    for (const [value, text] of [['empty', '空文本（不动输入框）'], ['replay', '重放上次用户内容']]) {
+        const option = node('option', text); option.value = value; mode.append(option);
+    }
     const filter = node('select');
     filter.setAttribute('aria-label', '差异显示范围');
     const filterOptions = [['changed', '仅差异消息'], ['all', '全部消息（按发送顺序）']];
@@ -174,8 +178,6 @@ export function mountRequestDiff(runtime, target = document.body, host = globalT
     const showEqualLines = node('input');
     showEqualLines.type = 'checkbox';
     showEqualLabel.append(showEqualLines, document.createTextNode('显示未变化的行'));
-    const undoBar = node('div', undefined, 'wbo-toolbar');
-    undoBar.hidden = true;
     const cards = node('div', undefined, 'wbo-cards');
 
     function report(text, error = false) {
@@ -185,22 +187,24 @@ export function mountRequestDiff(runtime, target = document.body, host = globalT
 
     function refreshBaseline() {
         const last = runtime.getLast();
+        const saved = runtime.getSimulationBase?.();
         baseline.textContent = last
-            ? '上次请求：' + new Date(last.sentAt).toLocaleString() + ' · ' + (last.model === null || last.model === undefined ? '未知模型' : last.model) + ' · ' + last.messages.length + ' 条消息。此功能只记录安装并刷新后真实发送过的请求。'
-            : '当前聊天尚无请求记录。先正常发送一次消息建立基线；不会为建立基线自动调用模型。';
+            ? '最近一次真实请求：' + new Date(last.sentAt).toLocaleString() + ' · ' + (last.model ?? '未知模型') + ' · ' + last.messages.length + ' 条消息。后续正常发送会覆盖；只在当前页面内存保留。'
+            : saved ? '当前基准为手动保存的模拟结果（不是实际发送）。下次正常发送将优先使用真实记录。'
+            : '当前聊天暂无真实记录。可以直接模拟空文本，再将结果设为模拟基准，不必为了对比额外发送请求。';
     }
 
     function renderCapture() {
         summary.replaceChildren();
         cards.replaceChildren();
-        summary.append(node('strong', '本次捕获内容（还没有可对比的上一次请求）'));
-        summary.append(node('p', '先正常发送一次消息建立基线，之后再捕获即可看到从头到尾的差异。'));
+        summary.append(node('strong', '本次模拟内容（暂无对比基准）'));
+        summary.append(node('p', '可点击「将本次模拟设为基准」，修改设置后再次模拟。无需额外发送，也不会动输入框。'));
         for (const text of result.warnings) summary.append(node('p', text, 'wbo-muted'));
         result.current.messages.forEach((message, index) => {
             const card = node('article', undefined, 'wbo-card');
             card.dataset.messageIndex = String(index);
             card.append(node('strong', '#' + (index + 1) + ' · ' + (message.role === undefined ? '未知角色' : message.role)));
-card.append(node('pre', typeof message.content === 'string' ? message.content : JSON.stringify(message.content === undefined ? message : message.content, null, 2)));
+            card.append(node('pre', typeof message.content === 'string' ? message.content : JSON.stringify(message.content === undefined ? message : message.content, null, 2)));
             cards.append(card);
         });
     }
@@ -217,7 +221,8 @@ card.append(node('pre', typeof message.content === 'string' ? message.content : 
             ? '第一处差异：消息 #' + (first.index + 1) + ' · ' + first.field + (firstLine === null ? '' : ' · 第 ' + firstLine + ' 行') + ' · UTF-16 偏移 ' + first.characterPosition
             : '消息输入完全相同';
         summary.append(node('strong', headline));
-        summary.append(node('p', '消息条数：上次 ' + result.previous.messages.length + ' → 捕获 ' + result.current.messages.length + '。规范化 JSON 相同前缀 ' + diff.prefixCharacters + ' 个 UTF-16 单元（上次总长 ' + diff.totalBefore + ' → 捕获 ' + diff.totalAfter + '）。这不是 token 数量，也不是 API 缓存命中率。'));
+        summary.append(node('p', '消息条数：上次 ' + result.previous.messages.length + ' → 模拟 ' + result.current.messages.length + '。规范化 JSON 相同前缀 ' + diff.prefixCharacters + ' 个 UTF-16 单元（上次总长 ' + diff.totalBefore + ' → 模拟 ' + diff.totalAfter + '）。这不是 token 数量，也不是 API 缓存命中率。'));
+        summary.append(node('p', '基准类型：' + (result.previous.kind === 'simulation' ? '手动模拟快照' : '真实发送记录') + ' → 本次 dry-run 模拟。', 'wbo-muted'));
         if (result.previous.model !== result.current.model || result.previous.source !== result.current.source) {
             summary.append(node('p', '模型或提供商已变化：即使消息相同，也不应推断缓存可复用。', 'wbo-warning'));
         }
@@ -257,24 +262,22 @@ card.append(node('pre', typeof message.content === 'string' ? message.content : 
         if (diff) renderComparison(); else renderCapture();
     }
 
-    const capture = button('捕获当前输入并对比', async () => {
+    const capture = button('模拟并对比', async () => {
         if (busy) return;
         busy = true;
         panel.setAttribute('aria-busy', 'true');
         panel.querySelectorAll('button,input,select').forEach(element => { element.disabled = true; });
-        report('正在让酒馆组装提示词，随后会立刻取消请求……');
+        report('正在模拟组装提示词，不读取输入框、不调用模型……');
         try {
-            const nextCapture = await runtime.captureCurrent();
+            const nextCapture = await runtime.simulate({ mode: mode.value });
             result = nextCapture;
             diff = buildComparison(nextCapture.previous, nextCapture.current);
-            undoBar.hidden = !nextCapture.wroteMessage;
             refreshBaseline();
             render();
             report(nextCapture.previous
-                ? '捕获完成，已取消本次 AI 请求。'
-                : '捕获完成，已取消本次 AI 请求；此前没有真实请求记录，因此只列出本次捕获内容。');
+                ? '模拟完成：未发送模型请求，未新增聊天消息，输入框保持原样。'
+                : '模拟完成，暂无对比基准。可将本次结果设为模拟基准后再次对比。');
         } catch (error) {
-            undoBar.hidden = !(runtime.wroteChatMessage && runtime.wroteChatMessage());
             report(error.message, true);
         } finally {
             busy = false;
@@ -282,17 +285,6 @@ card.append(node('pre', typeof message.content === 'string' ? message.content : 
             panel.querySelectorAll('button,input,select').forEach(element => { element.disabled = false; });
         }
     });
-
-    const undoButton = button('撤回该消息', async () => {
-        try {
-            await runtime.undoWrittenMessage();
-            undoBar.hidden = true;
-            report('已撤回本次捕获写入的消息。');
-        } catch (error) {
-            report(error.message, true);
-        }
-    });
-    undoBar.append(node('span', '本次捕获写入了一条用户消息：', 'wbo-muted'), undoButton);
 
     const jumpButton = button('跳到第一处差异', () => {
         if (!diff || !diff.firstDifference) { report('还没有可跳转的差异。'); return; }
@@ -309,17 +301,24 @@ card.append(node('pre', typeof message.content === 'string' ? message.content : 
         diff = null;
         summary.replaceChildren();
         cards.replaceChildren();
-        undoBar.hidden = !(runtime.wroteChatMessage && runtime.wroteChatMessage());
         refreshBaseline();
-        report('内存中的请求记录已清除；安全撤回信息仍保留，不自动删除聊天消息。');
+        report('内存中的真实记录与模拟基准已清除，没有改动聊天消息。');
     });
 
-    toolbar.append(capture, filter, showEqualLabel, jumpButton, clearButton);
+    const saveBase = button('将本次模拟设为基准', () => {
+        if (!result?.current) { report('请先完成一次模拟。', true); return; }
+        try {
+            runtime.setSimulationBase(result.current);
+            refreshBaseline();
+            report(runtime.getLast() ? '模拟基准已保存；当前仍优先与最近一次真实请求比较。' : '已设为模拟基准，修改设置后可再次模拟对比。');
+        } catch (error) { report(error.message, true); }
+    });
+    toolbar.append(mode, capture, saveBase, filter, showEqualLabel, jumpButton, clearButton);
     filter.onchange = render;
     showEqualLines.onchange = render;
 
     const body = node('div', undefined, 'wbo-panel-body');
-    body.append(intro, warning, baseline, toolbar, undoBar, status, summary, cards);
+    body.append(intro, warning, baseline, toolbar, status, summary, cards);
     panel.append(header, body, resizeHandle);
     overlay.append(panel);
     target.append(overlay);

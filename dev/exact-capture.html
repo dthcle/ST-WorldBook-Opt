@@ -1,32 +1,38 @@
 <!doctype html>
 <html lang="zh-CN" data-wbo-preview><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>请求诊断：最终传输与晚处理回归</title><link rel="stylesheet" href="../style.css">
-<style>body{background:#111723;color:#e4e8f0;font:16px system-ui;margin:24px}#extensionsMenu{max-width:400px;border:1px solid #445;margin:16px 0}textarea{width:min(700px,100%);height:80px;background:#222c3b;color:inherit}#checks{font-size:13px}body.compact{max-width:360px;margin:8px}</style>
-<h1>最终发送边界回归（内存模拟）</h1><p>先组装6条临时消息，后注册的插件再清理、合并为2条。仅计数假的传输，不访问模型接口。</p>
-<label for="send_textarea">当前输入（未发送）</label><br><textarea id="send_textarea">去海边寻找灯塔</textarea>
-<div id="extensionsMenu"></div><p id="checks" role="status"></p><button id="actual">模拟正常发送建立基线</button>
+<title>请求差异：不动输入框模拟回归</title><link rel="stylesheet" href="../style.css">
+<style>body{background:#111723;color:#e4e8f0;font:16px system-ui;margin:24px}#extensionsMenu{max-width:400px;border:1px solid #445;margin:16px 0;font-size:17.6px}#extensionsMenu>.extension_container>div{padding:5px;display:flex;gap:10px;align-items:baseline;cursor:pointer}.extensionsMenuExtensionButton{width:20px}textarea{width:min(700px,100%);height:80px;background:#222c3b;color:inherit}#checks{font-size:13px}body.compact{max-width:360px;margin:8px}</style>
+<h1>原生 dry-run 回归（内存模拟）</h1><p>模拟不写入聊天、不读取输入框、不增加模型传输；晚处理监听器完成后才读取消息。</p>
+<label for="send_textarea">你的草稿（模拟后必须保持原样）</label><br><textarea id="send_textarea">不要动我的草稿 /send 保持光标</textarea>
+<label for="world">模拟世界设定</label><input id="world" value="原始世界设定">
+<div id="extensionsMenu"></div><p id="checks" role="status"></p><button id="actual">模拟一次正常发送（假的传输）</button>
 <script type="module">
 import {createExactCapture} from '../exact-capture.js';
 import {initDiagnostics} from '../index.js';
 const query=new URLSearchParams(location.search);if(query.has('compact'))document.body.classList.add('compact');
-let delegated=0,stopped=0,phase='idle',cleaned=false;
-const hooks=[];
-const source={on(e,f){hooks.push(f)},async emit(body){for(const hook of hooks)await hook(body)}};
+let delegated=0,stopped=0,phase='idle',cleaned=false,composerReads=0;
+const hooks=new Map();
+const source={on(e,f){hooks.set(e,[...(hooks.get(e)||[]),f])},removeListener(e,f){hooks.set(e,(hooks.get(e)||[]).filter(h=>h!==f))},async emit(e,...args){for(const hook of [...(hooks.get(e)||[])])await hook(...args)}};
 const host={location:{origin:location.origin},async fetch(url,opts){delegated++;return new Response('{}',{status:200})}};
-const state={characterId:null,chatId:null,groupId:null,chat:[]};
-const ctx=()=>({...state,mainApi:'openai',name1:'用户',eventSource:source,eventTypes:{CHAT_COMPLETION_SETTINGS_READY:'ready'},
- async generate(type,options={}){phase='assembling';cleaned=false;const area=document.getElementById('send_textarea'),text=area.value;area.value='';state.chat.push({name:'用户',is_user:true,mes:text,send_date:'mock'});
- const packet={type:'normal',model:'mock-model',chat_completion_source:'custom',messages:[{role:'system',content:'固定系统规则。'},...Array.from({length:5},(_,i)=>({role:'user',content:`§§TH_SQUASH_WI:temporary-${i}:START§§`}))]};
- await source.emit(packet);try{await host.fetch('/api/backends/chat-completions/generate',{method:'POST',body:JSON.stringify(packet),signal:options.signal})}finally{phase='idle';cleaned=true}},
- async deleteMessage(index,swipe,confirm,toolCalls){if(index!==state.chat.length-1)throw Error('bad delete index');state.chat.splice(index,1)} });
-const runtime=createExactCapture({host,getContext:ctx,isGenerating:()=>phase!=='idle',stopGeneration:()=>{stopped++},getInput:()=>document.getElementById('send_textarea').value});
-// Registered after diagnostics, just like the audited source's makeLast handler.
-source.on('ready',packet=>{const history=state.chat.map(m=>`用户：${m.mes}`).join('\n');packet.messages.splice(0,packet.messages.length,{role:'system',content:'固定系统规则。'},{role:'user',content:'稳定设定与历史\n'+history})});
-// Context initially empty at installation; opening a chat later must still work.
-state.characterId=0;state.chatId='mock-chat';
-async function actual(){try{await ctx().generate('normal');document.getElementById('send_textarea').value='去海边寻找灯塔'}catch(error){console.error(error)}}
-if(!query.has('nobaseline')){document.getElementById('send_textarea').value='你好';await actual()}
+const state={characterId:0,chatId:'mock-chat',groupId:null,chat:[{name:'角色',is_user:false,mes:'开场白'},{name:'用户',is_user:true,mes:'你好'}]};
+const original=state.chat.slice();
+const ctx=()=>({...state,mainApi:'openai',name1:'用户',eventSource:source,eventTypes:{GENERATE_AFTER_DATA:'after',CHAT_COMPLETION_SETTINGS_READY:'ready'},
+ async generate(type,options={},dryRun=false){phase='assembling';cleaned=false;try{
+  if(!dryRun)state.chat.push({name:'用户',is_user:true,mes:'真实输入',send_date:'mock'});
+  const packet={prompt:[{role:'system',content:document.getElementById('world').value},...state.chat.map(m=>({role:m.is_user?'user':'assistant',content:m.mes}))]};
+  await source.emit('after',packet,dryRun);
+  if(dryRun)return;
+  const body={type:'normal',model:'mock-model',chat_completion_source:'custom',messages:packet.prompt};await source.emit('ready',body);
+  await host.fetch('/api/backends/chat-completions/generate',{method:'POST',body:JSON.stringify(body)});
+ }finally{phase='idle';cleaned=true}},
+ async deleteMessage(){throw Error('模拟不应删除消息')} });
+const runtime=createExactCapture({host,getContext:ctx,isGenerating:()=>phase!=='idle',stopGeneration:()=>{stopped++},dryRunGenerate:c=>c.generate('normal',{},true),getModel:()=> 'mock-model',getSource:()=> 'custom',getInput:()=>{composerReads++;return document.getElementById('send_textarea').value}});
+// Late mutations must be included. No real provider endpoint is used by this fixture.
+source.on('after',async data=>{await Promise.resolve();data.prompt[0].content+='\n晚处理完成';});
+async function actual(){await ctx().generate('normal');state.chat.push({name:'角色',is_user:false,mes:'后来收到的回复'});}
+if(!query.has('nobaseline'))await actual();
+const settled=state.chat.slice();const draft=document.getElementById('send_textarea').value;
 await initDiagnostics(async()=>runtime);document.getElementById('actual').onclick=actual;
-function report(){const last=runtime.getLast();document.getElementById('checks').textContent=`传输调用 ${delegated}（预览不应增加） · 停止请求 ${stopped} · 流程清理 ${cleaned?'PASS':'idle'} · 基线 ${last?.messages.length??0} 条 · 基线含临时标记 ${JSON.stringify(last??{}).includes('TH_SQUASH_WI')?'FAIL':'NO'} · 当前聊天 ${state.chat.length} 条`}
+function report(){const last=runtime.getLast();document.getElementById('checks').textContent=`模型传输 ${delegated}（模拟不应增加） · 停止 ${stopped} · 清理 ${cleaned?'PASS':'idle'} · 基线 ${last?.messages.length??0} 条 · 输入读取 ${composerReads} · 草稿 ${document.getElementById('send_textarea').value===draft?'PASS':'CHANGED'} · 聊天身份 ${settled.every((m,i)=>state.chat[i]===m)&&state.chat.length===settled.length?'PASS':'CHANGED'}`;}
 setInterval(report,300);report();
 </script></html>

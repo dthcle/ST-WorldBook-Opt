@@ -1,7 +1,9 @@
 // Observe/capture the final browser -> SillyTavern JSON transport, NOT a prompt-ready event.
 // All awaited SETTINGS_READY listeners (including squash/unwrapping) finish before this point.
-// Preview runs the normal ST assembly pipeline, but this wrapper never forwards its model call.
-// Normal ST generation may persist a user message/run macros; this is not a pure simulation.
+// New UI uses native dry-run (third Generate argument), never the old ordinary-send preview.
+// Dry-run snapshots are explicitly NOT the final transport: several ordinary handlers are skipped.
+// Legacy captureCurrent remains an internal compatibility API; it may persist a user message.
+import { replaySnapshot, useReplayChat, useRecordCopies } from './request-snapshot.js';
 const runtimes = new WeakMap();
 const ENDPOINT = '/api/backends/chat-completions/generate';
 const MAX_BODY_CHARS = 16 * 1024 * 1024;
@@ -31,11 +33,12 @@ async function readBody(input, options) {
 
 export function createExactCapture({ getContext, host = globalThis, isGenerating = () => false, stopGeneration,
     timeoutMs = 60000, now = () => new Date().toISOString(), getInput = () => host.document?.getElementById('send_textarea')?.value ?? '',
-    hasAttachment = () => false } = {}) {
+    hasAttachment = () => false, dryRunGenerate, getModel = () => getContext()?.getChatCompletionModel?.() ?? null,
+    getSource = () => getContext()?.chatCompletionSettings?.chat_completion_source ?? null, getPromptError = () => null } = {}) {
     if (runtimes.has(host)) return runtimes.get(host);
     if (typeof getContext !== 'function' || typeof host.fetch !== 'function' || !host.location?.origin) throw new Error('当前环境缺少标准 fetch 请求捕获接口。');
     if (typeof stopGeneration !== 'function') throw new Error('当前环境缺少停止生成接口。');
-    let last = null, preview = null, undo = null, disabled = false, sequence = 0, newestAck = 0;
+    let last = null, replay = null, simulationBase = null, preview = null, undo = null, disabled = false, sequence = 0, newestAck = 0;
     let topWrapper = null, topDelegate = null;
     const stop = session => {
         if (session.stopped) return;
@@ -71,10 +74,16 @@ export function createExactCapture({ getContext, host = globalThis, isGenerating
             const method = String(options?.method ?? input?.method ?? 'GET').toUpperCase();
             const primary = sameOrigin && url.pathname === ENDPOINT && method === 'POST';
             // Freeze attribution before any asynchronous Request.clone().text() read.
-            const dispatchKey = primary ? chatKey(getContext()) : null;
+            const dispatchContext = primary ? getContext() : null;
+            const dispatchKey = primary ? chatKey(dispatchContext) : null;
+            const dispatchReplay = primary && !preview && dispatchContext?.chat?.at(-1)?.is_user ? replaySnapshot(dispatchContext) : null;
             const sentAt = primary ? now() : null;
             const attemptId = primary ? ++sequence : null;
             const session = preview;
+            if (session?.dryRun && primary) {
+                rejectSession(session, new Error('酒馆模拟意外尝试调用模型，已阻止；没有退回普通发送。'));
+                stop(session); throw abortError('Dry run attempted model transport');
+            }
             if (session && primary) {
                 try {
                     const body = await readBody(input, options);
@@ -89,6 +98,10 @@ export function createExactCapture({ getContext, host = globalThis, isGenerating
                 stop(session);
                 throw abortError('WorldBook Opt intercepted preview before transport');
             }
+            if (session?.dryRun && sameOrigin && (/^\/api\/tokenizers\/remote\//.test(url.pathname) || (method !== 'GET' && !/^\/api\/(?:tokenizers\/|worldinfo\/get$)/.test(url.pathname)))) {
+                rejectSession(session, new Error('模拟阻止了写入或不支持的本地请求：' + url.pathname));
+                stop(session); throw abortError('Dry run write request blocked');
+            }
             if (session && (!sameOrigin || modelRoute(url.pathname))) {
                 rejectSession(session, new Error('预览阻止了额外模型或外部网络请求，不能给出可靠结果。'));
                 stop(session); throw abortError('Extra preview network request blocked');
@@ -97,7 +110,7 @@ export function createExactCapture({ getContext, host = globalThis, isGenerating
             if (!session && !disabled && primary && !(options?.signal ?? input?.signal)?.aborted) {
                 try {
                     const body = await readBody(input,options);
-                    if (body.type !== 'quiet' && body.type !== 'impersonate') candidate = { ...selectPayload(body), key: dispatchKey, sentAt, id: attemptId };
+                    if (body.type !== 'quiet' && body.type !== 'impersonate') candidate = { ...selectPayload(body), key: dispatchKey, sentAt, id: attemptId, generationType: body.type ?? 'normal' };
                 } catch { /* Ordinary requests must not break because diagnostics cannot parse them. */ }
             }
             const response = await delegate.call(host,input,options);
@@ -105,7 +118,8 @@ export function createExactCapture({ getContext, host = globalThis, isGenerating
             // establishes the baseline; streaming completion/upstream billing is NOT inferred.
             if (!disabled && candidate && response.ok && !(options?.signal ?? input?.signal)?.aborted && candidate.id > newestAck) {
                 newestAck = candidate.id;
-                last = { ...candidate, status: `酒馆后端已响应 HTTP ${response.status}` };
+                last = { ...candidate, kind: 'actual', status: `酒馆后端已响应 HTTP ${response.status}` };
+                replay = candidate.generationType === 'normal' ? dispatchReplay : null;
             }
             return response;
         };
@@ -116,10 +130,91 @@ export function createExactCapture({ getContext, host = globalThis, isGenerating
         getLast() { return last?.key === chatKey(getContext()) ? structuredClone(last) : null; },
         isBusy() { return preview !== null; },
         wroteChatMessage() { return Boolean(undo); },
-        clear() { last = null; newestAck = ++sequence; /* Keep undo so clearing history cannot orphan safe recovery. */ },
+        getSimulationBase() { return simulationBase?.key === chatKey(getContext()) ? structuredClone(simulationBase) : null; },
+        setSimulationBase(packet) {
+            if (preview || isGenerating()) throw new Error('请等待模拟结束。');
+            if (packet?.kind !== 'simulation' || packet.key !== chatKey(getContext())) throw new Error('只能使用当前聊天的模拟结果作为模拟基准。');
+            simulationBase = { ...selectPayload({ ...packet, chat_completion_source: packet.source }), key: packet.key, kind: 'simulation', capturedAt: packet.capturedAt };
+        },
+        clear() { last = null; replay = null; simulationBase = null; newestAck = ++sequence; /* Preserve legacy safe recovery. */ },
+        simulate({ mode = 'empty' } = {}) {
+            if (disabled) return Promise.reject(new Error('捕获器已关闭。'));
+            if (preview || isGenerating()) return Promise.reject(new Error('正在生成/预览，请等待流程结束。'));
+            const ctx = getContext();
+            if (ctx.mainApi !== 'openai') return Promise.reject(new Error('仅支持标准 Chat Completion 提示词模拟。'));
+            if (ctx.groupId != null && ctx.groupId !== '') return Promise.reject(new Error('本版不模拟群聊。'));
+            if (ctx.characterId == null || !Array.isArray(ctx.chat)) return Promise.reject(new Error('请先打开单人角色聊天。'));
+            if (!['empty', 'replay'].includes(mode)) return Promise.reject(new Error('未知模拟方式。'));
+            const event = ctx.eventTypes?.GENERATE_AFTER_DATA;
+            if (typeof dryRunGenerate !== 'function' || !event || typeof ctx.eventSource?.on !== 'function' || typeof ctx.eventSource?.removeListener !== 'function') {
+                return Promise.reject(new Error('当前酒馆缺少已验证的 dry-run 接口；不会退回普通发送。'));
+            }
+            const previous = runtime.getLast() ?? runtime.getSimulationBase();
+            if (mode === 'replay' && (!runtime.getLast() || !replay)) return Promise.reject(new Error('暂无上次用户发送快照，请先用空文本模拟；不会自动发送请求。'));
+            // Empty means append nothing: ST dry-run ignores the composer and send_if_empty.
+            // Even empty mode works on copies, because ST substitutes the first greeting in-place.
+            const snapshot = mode === 'replay' ? replay : { chat: ctx.chat };
+            let restore, restoreMetadata = () => {}, restorePrompts = () => {};
+            try {
+                restore = useReplayChat(ctx.chat, snapshot);
+                restoreMetadata = useRecordCopies(ctx.chatMetadata);
+                restorePrompts = useRecordCopies(ctx.extensionPrompts);
+            } catch (error) { restore?.(); restoreMetadata(); return Promise.reject(error); }
+            installTopWrapper();
+            const session = { dryRun: true, key: chatKey(ctx), chat: ctx.chat, previous, packet: null, data: null,
+                callerSettled: false, stopped: false, error: null, received: false };
+            preview = session;
+            return new Promise((resolve, reject) => {
+                session.reject = reject;
+                const listener = (data, dryRun) => {
+                    if (dryRun !== true || chatKey(getContext()) !== session.key || getContext().chat !== session.chat) {
+                        rejectSession(session, new Error('模拟流程或聊天身份发生变化，结果已丢弃。')); return;
+                    }
+                    if (session.received) { rejectSession(session, new Error('同一次模拟出现多个组装结果，无法确认。')); return; }
+                    session.received = true;
+                    session.data = data; // Do NOT clone in a listener: later awaited plugins still mutate it.
+                };
+                ctx.eventSource.on(event, listener);
+                const timer = setTimeout(() => {
+                    rejectSession(session, new Error('模拟超时，拦截会保留到组装结束；没有发送模型请求。'));
+                    stop(session);
+                }, timeoutMs);
+                const finish = error => {
+                    clearTimeout(timer);
+                    ctx.eventSource.removeListener(event, listener);
+                    // ST may reuse the same exported array when switching chats. Never overwrite
+                    // that newly loaded chat; restore a detached old array or the unchanged chat only.
+                    const after = getContext();
+                    if (chatKey(after) === session.key || after.chat !== session.chat) restore();
+                    if (chatKey(after) === session.key || after.chatMetadata !== ctx.chatMetadata) restoreMetadata();
+                    if (chatKey(after) === session.key || after.extensionPrompts !== ctx.extensionPrompts) restorePrompts();
+                    if (preview === session) preview = null;
+                    if (disabled) removePatches();
+                    if (session.callerSettled) return;
+                    try {
+                        if (session.error) throw session.error;
+                        if (error) throw error;
+                        if (getPromptError()) throw new Error('酒馆提示词组装出错：' + getPromptError());
+                        if (chatKey(getContext()) !== session.key || getContext().chat !== session.chat) throw new Error('聊天已切换，模拟结果已丢弃。');
+                        if (!session.data || !Array.isArray(session.data.prompt) || !session.data.prompt.length) throw new Error('酒馆未产出有效的 dry-run 消息列表；没有退回普通发送。');
+                        const current = { ...selectPayload({ messages: session.data.prompt, model: getModel(), chat_completion_source: getSource() }),
+                            key: session.key, kind: 'simulation', mode, capturedAt: now() };
+                        session.callerSettled = true;
+                        resolve({ previous, current, wroteMessage: false, warnings: [
+                            '这是 dry-run 提示词快照：不读取输入框，不追加空用户消息，不调用模型；聊天原消息对象已恢复。',
+                            mode === 'replay' ? '重放的是上次请求时截至最后一条用户消息的历史快照，不包含随后生成的回复。' : '空文本模拟使用当前聊天历史，没有加入新文本；它不是实际发送一个空消息。',
+                            'dry-run 不执行全部普通发送拦截器/SETTINGS_READY 后处理、系统消息合并；世界书粘附/冷却的判断也不同。与真实基准的差异可能包含这些流程差异，不保证等于最终 API 正文。',
+                            '宏、世界书和第三方插件仍可能更新私有状态；标准写入 fetch 已阻止，但这不是任意第三方代码的安全沙箱。',
+                        ] });
+                    } catch (failure) { rejectSession(session, failure); }
+                };
+                // Critical: dryRun is Generate's THIRD positional argument in ST, not an options property.
+                Promise.resolve().then(() => dryRunGenerate(ctx)).then(() => finish(), finish);
+            });
+        },
         destroy() {
             if (disabled) return;
-            disabled = true; last = null;
+            disabled = true; last = null; replay = null; simulationBase = null;
             if (preview) { rejectSession(preview,new Error('捕获器已关闭，预览已停止。')); stop(preview); }
             else removePatches();
         },
@@ -195,5 +290,12 @@ export async function installExactCapture() {
     const core = await import('/script.js');
     const {getContext} = await import('/scripts/extensions.js');
     const {hasPendingFileAttachment} = await import('/scripts/chats.js');
-    return createExactCapture({getContext,isGenerating:()=>Boolean(core.isGenerating?.()),stopGeneration:core.stopGeneration,hasAttachment:hasPendingFileAttachment});
+    const openai = await import('/scripts/openai.js');
+    return createExactCapture({getContext,isGenerating:()=>Boolean(core.isGenerating?.()),stopGeneration:core.stopGeneration,hasAttachment:hasPendingFileAttachment,
+        // Verified native signature: Generate(type, options, dryRun).
+        dryRunGenerate: typeof core.Generate === 'function' ? () => core.Generate('normal', {}, true) : undefined,
+        getModel: () => openai.getChatCompletionModel?.() ?? null,
+        getSource: () => openai.oai_settings?.chat_completion_source ?? null,
+        getPromptError: () => openai.promptManager?.error ?? null,
+    });
 }

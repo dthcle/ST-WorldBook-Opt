@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN" data-wbo-preview>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wand 菜单原生样式自检</title>
+<style>
+/* Minimal native rules from ST release/public/style.css:
+   https://github.com/SillyTavern/SillyTavern/blob/release/public/style.css
+   Native example: release/public/scripts/extensions/translate/buttons.html.
+   No font assets/network required: this fixture checks row/icon box geometry. */
+:root{--mainFontSize:15px;--SmartThemeBodyColor:#dcdcd2;--SmartThemeBlurTintColor:#171717;--SmartThemeBorderColor:#555;--interactable-outline-color:#fff}
+*{box-sizing:border-box}
+body{margin:0;padding:24px;background:#202020;color:var(--SmartThemeBodyColor);font:var(--mainFontSize) system-ui}
+#extensionsMenu{display:flex;flex-flow:column;border-radius:10px;padding:2px;background:var(--SmartThemeBlurTintColor)}
+.list-group{overflow:hidden;display:block;border:1px solid var(--SmartThemeBorderColor);border-radius:10px;font-size:calc(var(--mainFontSize) * 1.1)}
+.extensionsMenuExtensionButton{height:20px;width:20px;font-size:calc(var(--mainFontSize) * 1.1);display:flex;align-items:center;justify-content:center;pointer-events:none}
+#extensionsMenu>.extension_container>div,#extensionsMenu>div:not(.extension_container),.list-group>div,.list-group .list-group-item{color:var(--SmartThemeBodyColor);padding:5px 5px;padding-bottom:5px;text-decoration:none;display:flex;column-gap:10px;cursor:pointer;align-items:baseline}
+#extensionsMenu>.extension_container>div,#extensionsMenu>div:not(.extension_container),.list-group-item{opacity:.5}
+#extensionsMenu>.extension_container>div:hover,#extensionsMenu>div:not(.extension_container):hover,.list-group-item:hover{opacity:1}
+h1{font-size:20px}p{max-width:680px;line-height:1.6}#extensionsMenu{max-width:420px}#result{white-space:pre-wrap;font:13px/1.6 monospace}#activation{font-size:14px}button{font:inherit;margin:8px 8px 8px 0;padding:6px 10px}
+/* Offline glyph stand-ins only; production uses ST bundled FA 6.5.2. */
+.fixture-glyph{font-size:inherit;font-style:normal}.fixture-glyph::before{content:'↔'}
+</style>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<h1>Wand 菜单原生样式自检</h1>
+<p>原生 ST 行和真实 WorldBook Opt 行必须字号、内边距、高度、标签横坐标一致。按钮切换主题字号和内边距，验证扩展不会写死 14px / 12px。离线图标仅作占位（生产使用 ST 已捆绑的 Font Awesome）。</p>
+<button id="large" type="button">大字号 22px</button><button id="small" type="button">小字号 13px</button><button id="theme" type="button">主题内边距 9px 17px</button><button id="reset" type="button">恢复默认</button>
+<div id="extensionsMenu" class="list-group">
+<div class="extension_container"><div id="native" class="list-group-item"><div class="fixture-glyph extensionsMenuExtensionButton" aria-hidden="true"></div><span>翻译输入</span></div></div>
+</div>
+<pre id="result" role="status">running</pre><p id="activation">激活次数：0</p>
+<script type="module">
+import { buildWandMenuEntry } from '../index.js';
+let activations=0;
+const menu=document.getElementById('extensionsMenu');
+const entry=buildWandMenuEntry(()=>{document.getElementById('activation').textContent=`激活次数：${++activations}`});
+entry.firstElementChild.classList.add('fixture-glyph');
+const container=document.createElement('div');container.className='extension_container';container.append(entry);menu.append(container);
+const theme=document.createElement('style');document.head.append(theme);
+// Mirror ST keyboard.js delegated Enter path: the row fallback must stop this
+// from issuing a second click, while also working in older/offline hosts.
+document.addEventListener('keydown',event=>{
+ if(event.key==='Enter'&&!event.altKey&&!event.ctrlKey&&!event.shiftKey){
+  event.target.closest('.interactable')?.click();
+ }
+});
+function check(){
+ const native=document.getElementById('native'), ns=getComputedStyle(native), ws=getComputedStyle(entry);
+ const nr=native.getBoundingClientRect(),wr=entry.getBoundingClientRect();
+ const failures=[];const lines=[];
+ for(const property of ['fontSize','fontFamily','lineHeight','paddingTop','paddingRight','paddingBottom','paddingLeft','columnGap','alignItems','color']){
+  const pass=ns[property]===ws[property];if(!pass)failures.push(property);lines.push(`${pass?'PASS':'FAIL'} ${property}: ${ns[property]} / ${ws[property]}`);
+ }
+ for(const [name,a,b] of [['row height',nr.height,wr.height],['label x',native.lastElementChild.getBoundingClientRect().x,entry.lastElementChild.getBoundingClientRect().x],['icon width',native.firstElementChild.getBoundingClientRect().width,entry.firstElementChild.getBoundingClientRect().width]]){
+  const pass=Math.abs(a-b)<.1;if(!pass)failures.push(name);lines.push(`${pass?'PASS':'FAIL'} ${name}: ${a} / ${b}`);
+ }
+ lines.unshift(`${failures.length?'FAIL':'PASS'} native menu parity; wand tag=${entry.tagName}`);
+ document.getElementById('result').textContent=lines.join('\n');
+}
+for(const [id,size] of [['large','22px'],['small','13px']])document.getElementById(id).onclick=()=>{document.documentElement.style.setProperty('--mainFontSize',size);check()};
+document.getElementById('theme').onclick=()=>{theme.textContent='#extensionsMenu>.extension_container>div{padding:9px 17px;column-gap:14px}';check()};
+document.getElementById('reset').onclick=()=>{document.documentElement.style.removeProperty('--mainFontSize');theme.textContent='';check()};
+check();
+</script>
+</body></html>
