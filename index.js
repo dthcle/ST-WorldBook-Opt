@@ -79,7 +79,7 @@ export async function initDiagnostics(factory = installExactCapture) {
             const icon = document.createElement('i');
             icon.className = 'fa-solid fa-magnifying-glass'; icon.setAttribute('aria-hidden', 'true');
             const label = document.createElement('span');
-            label.textContent = '请求输入差异（不发出请求）';
+            label.textContent = '请求输入差异';
             button.append(icon, label);
             button.addEventListener('click', () => { if (!document.querySelector('.wbo-overlay')) mountRequestDiff(runtime); });
             container.append(button); menu.append(container);

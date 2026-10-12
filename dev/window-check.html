@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN" data-wbo-preview><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>浮窗几何自检</title><link rel="stylesheet" href="../style.css">
+<style>body{background:#111723;color:#e4e8f0;font:16px system-ui;margin:0;padding:20px;height:1600px}button,.menu_button{width:40px;min-width:40px;white-space:normal}#result{font-size:13px;white-space:pre-wrap}</style>
+<h1 style="font-size:18px">浮窗几何自检（模拟 390x664 手机视口）</h1>
+<pre id="result" role="status">running</pre>
+<script type="module">
+import {mountRequestDiff} from '../request-diff-ui.js';
+// Fake host: a 390x664 viewport, and the page itself is scrolled/offset.
+const host={innerWidth:390,innerHeight:664,visualViewport:{width:390,height:664,offsetTop:0,addEventListener(){},removeEventListener(){}},addEventListener(){},removeEventListener(){}};
+document.documentElement.appendChild(document.createElement('div'));
+const runtime={getLast:()=>null,clear(){},isBusy:()=>false,wroteChatMessage:()=>false,async captureCurrent(){throw new Error('no baseline in this fixture')}}
+const lines=[];
+try{
+  const app=mountRequestDiff(runtime,document.body,host);
+  const panel=app.panel, overlay=app.overlay;
+  const overlayRect=overlay.getBoundingClientRect();
+  const panelRect=panel.getBoundingClientRect();
+  const body=panel.querySelector('.wbo-panel-body');
+  const style=panel.style;
+  lines.push('overlay height=' + Math.round(overlayRect.height) + ' width=' + Math.round(overlayRect.width) + ' top=' + Math.round(overlayRect.top));
+  lines.push('panel w=' + Math.round(panelRect.width) + ' h=' + Math.round(panelRect.height) + ' top=' + Math.round(panelRect.top) + ' left=' + Math.round(panelRect.left));
+  lines.push('css ' + style.getPropertyValue('--wbo-width') + ' / ' + style.getPropertyValue('--wbo-height') + ' / left ' + style.getPropertyValue('--wbo-left'));
+  lines.push('has wbo-floating=' + panel.classList.contains('wbo-floating') + ' has body=' + Boolean(body) + ' bodyScrollable=' + (body ? body.scrollHeight >= body.clientHeight : false));
+  lines.push('resize handle=' + Boolean(panel.querySelector('.wbo-resize')) + ' drag header=' + Boolean(panel.querySelector('.wbo-drag')));
+  const vh=panelRect.height/664, vw=panelRect.width/390;
+  lines.push('fills viewport: height>' + (vh>0.9?'PASS':'FAIL') + ' width>' + (vw>0.9?'PASS':'FAIL'));
+  lines.push('top not clipped: ' + (panelRect.top >= 0 ? 'PASS' : 'FAIL') + ' bottom inside: ' + (panelRect.bottom <= 664+1 ? 'PASS' : 'FAIL'));
+  app.detach();
+  lines.push('detach ok, overlay still in DOM=' + document.body.contains(overlay));
+}catch(error){lines.push('THREW: ' + (error && error.message))}
+document.getElementById('result').textContent=lines.join('\n');
+</script></html>
