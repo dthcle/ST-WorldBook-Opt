@@ -27,7 +27,7 @@ export function buildSettingsDrawer(actions) {
     content.className = 'inline-drawer-content';
     content.style.display = 'none';
     content.append(
-        Object.assign(document.createElement('p'), { className: 'wbo-muted', textContent: '逐条对比、手动应用、自动备份；记录真实 N−1→N 请求差异，下一次预览固定以上次真实发送为 BASE，不改动输入框。' }),
+        Object.assign(document.createElement('p'), { className: 'wbo-muted', textContent: '逐条对比、手动应用、自动备份；记录真实 N−1→N 请求差异，并提供在最终 fetch 边界截断的空文本真实流水线预览。' }),
     );
     const row = document.createElement('div');
     row.className = 'wbo-toolbar';

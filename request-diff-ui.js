@@ -154,17 +154,12 @@ export function mountRequestDiff(runtime, target = document.body, host = globalT
     resizeHandle.setAttribute('aria-label', '调整窗口大小');
     const dragDetach = makeMovable(panel, host, header, resizeHandle);
 
-    const intro = node('p', 'BASE 固定为上次真实发送 N−1；预览使用当前聊天组装即将发送 N，不重放旧一轮，不把模拟设为基准。预览不会覆盖真实记录。正常发送 N 后，也可直接查看最近两次真实请求的差异。', 'wbo-muted');
-    const warning = node('p', '发送前 dry-run 只是近似预览：空文本不包含新正文；草稿预览只读输入框、不清空、不写入聊天。两种方式都不调用模型，但会跳过部分真实发送处理。实际缓存命中率须看提供商 cached tokens，不能用字符前缀当作命中率。宏/插件仍可能有副作用；预览期间不要发送或切换聊天。', 'wbo-warning');
+    const intro = node('p', 'BASE 固定为上次真实发送 N−1；预览走同一条真实发送流水线，在最终 fetch 边界截断，模型请求不会发出。预览不会覆盖 BASE。正常发送后可再查看最近两次真实请求差异。', 'wbo-muted');
+    const warning = node('p', '预览强制按空文本组装：只会读一次输入框确认它为空，绝不修改或清空草稿（有内容时提示你先自己清空）。因此正常情况不会新增用户消息。世界书粘滞/冷却、系统合并与发送拦截器都会真实执行，但结果仍不等于酒馆后端/提供商最终报文。实际缓存命中率须看提供商 cached tokens。宏/插件仍可能有副作用；预览期间不要发送或切换聊天。', 'wbo-warning');
     const baseline = node('p', undefined, 'wbo-muted');
     const status = node('p', undefined, 'wbo-status');
     status.setAttribute('role', 'status');
     const toolbar = node('div', undefined, 'wbo-toolbar');
-    const mode = node('select');
-    mode.setAttribute('aria-label', '模拟内容');
-    for (const [value, text] of [['empty', '预览下一次：空文本（不读输入框）'], ['draft', '预览下一次：当前草稿（只读）']]) {
-        const option = node('option', text); option.value = value; mode.append(option);
-    }
     const filter = node('select');
     filter.setAttribute('aria-label', '差异显示范围');
     const filterOptions = [['changed', '仅差异消息'], ['all', '全部消息（按发送顺序）']];
@@ -179,6 +174,8 @@ export function mountRequestDiff(runtime, target = document.body, host = globalT
     showEqualLines.type = 'checkbox';
     showEqualLabel.append(showEqualLines, document.createTextNode('显示未变化的行'));
     const cards = node('div', undefined, 'wbo-cards');
+    const undoBar = node('div', undefined, 'wbo-toolbar');
+    undoBar.hidden = true;
 
     function report(text, error = false) {
         status.textContent = text;
@@ -223,7 +220,7 @@ export function mountRequestDiff(runtime, target = document.body, host = globalT
         summary.append(node('p', '消息条数：真实 N−1 ' + result.previous.messages.length + ' → ' + afterLabel + ' ' + result.current.messages.length + '。规范化 JSON 相同前缀 ' + diff.prefixCharacters + ' 个 UTF-16 单元（上次总长 ' + diff.totalBefore + ' → 本次 ' + diff.totalAfter + '）。这不是 token 数量，也不是 API 缓存命中率。'));
         summary.append(node('p', result.current.kind === 'actual'
             ? '对比来源：第 N−1 次真实请求 → 第 N 次真实请求（发送边界记录）。'
-            : '对比来源：上次真实请求 N−1 → 当前聊天的下一次 N 近似预览。不是同一轮重放，也不是两个模拟互相比。', 'wbo-muted'));
+            : '对比来源：上次真实请求 N−1 → 本次空文本真实流水线预览。空文本发送本身就可能让末尾消息结构变化，请优先用「最近两次真实请求差异」判断真实缓存。', 'wbo-muted'));
         if (result.previous.model !== result.current.model || result.previous.source !== result.current.source) {
             summary.append(node('p', '模型或提供商已变化：即使消息相同，也不应推断缓存可复用。', 'wbo-warning'));
         }
@@ -263,22 +260,24 @@ export function mountRequestDiff(runtime, target = document.body, host = globalT
         if (diff) renderComparison(); else renderCapture();
     }
 
-    const capture = button('预览 N 与上次真实请求对比', async () => {
+    const capture = button('预览下一次（空文本真实流水线）', async () => {
         if (busy) return;
         busy = true;
         panel.setAttribute('aria-busy', 'true');
         panel.querySelectorAll('button,input,select').forEach(element => { element.disabled = true; });
-        report(mode.value === 'draft' ? '正在只读草稿预览下一次 N，不清空输入框、不调用模型……' : '正在以当前聊天预览下一次 N，不读取输入框、不调用模型……');
+        report('正在走真实发送流水线并按空文本组装，模型请求会在发出前截断……');
         try {
-            const nextCapture = await runtime.simulate({ mode: mode.value });
+            const nextCapture = await runtime.previewNext();
             result = nextCapture;
             diff = buildComparison(nextCapture.previous, nextCapture.current);
+            undoBar.hidden = !nextCapture.wroteMessage;
             refreshBaseline();
             render();
             report(nextCapture.previous
-                ? '已对比上次真实 N−1 与下一次 N 近似预览。真实 BASE 未改变，输入框未改动，没有模型请求。'
+                ? '预览完成：真实发送流水线已在最终 fetch 边界截断，模型请求未发出，BASE 未改变。'
                 : '预览完成，但没有真实 N−1 记录；不能做缓存差异对比。');
         } catch (error) {
+            undoBar.hidden = !(runtime.wroteChatMessage && runtime.wroteChatMessage());
             report(error.message, true);
         } finally {
             busy = false;
@@ -286,6 +285,17 @@ export function mountRequestDiff(runtime, target = document.body, host = globalT
             panel.querySelectorAll('button,input,select').forEach(element => { element.disabled = false; });
         }
     });
+
+    const undoButton = button('撤回该消息', async () => {
+        try {
+            await runtime.undoWrittenMessage();
+            undoBar.hidden = true;
+            report('已撤回本次预览写入的消息。');
+        } catch (error) {
+            report(error.message, true);
+        }
+    });
+    undoBar.append(node('span', '空文本预览仍写入了一条用户消息（可能来自空消息发送设置或插件）：', 'wbo-muted'), undoButton);
 
     const jumpButton = button('跳到第一处差异', () => {
         if (!diff || !diff.firstDifference) { report('还没有可跳转的差异。'); return; }
@@ -302,6 +312,7 @@ export function mountRequestDiff(runtime, target = document.body, host = globalT
         diff = null;
         summary.replaceChildren();
         cards.replaceChildren();
+        undoBar.hidden = !(runtime.wroteChatMessage && runtime.wroteChatMessage());
         refreshBaseline();
         report('内存中的真实请求记录已清除，没有改动聊天消息。');
     });
@@ -317,12 +328,12 @@ export function mountRequestDiff(runtime, target = document.body, host = globalT
         refreshBaseline(); render();
         report('已加载 N−1→N 两次真实请求差异；没有发起新请求。');
     });
-    toolbar.append(mode, capture, actualPair, filter, showEqualLabel, jumpButton, clearButton);
+    toolbar.append(capture, actualPair, filter, showEqualLabel, jumpButton, clearButton);
     filter.onchange = render;
     showEqualLines.onchange = render;
 
     const body = node('div', undefined, 'wbo-panel-body');
-    body.append(intro, warning, baseline, toolbar, status, summary, cards);
+    body.append(intro, warning, baseline, toolbar, undoBar, status, summary, cards);
     panel.append(header, body, resizeHandle);
     overlay.append(panel);
     target.append(overlay);

@@ -1,39 +1,39 @@
 <!doctype html>
 <html lang="zh-CN" data-wbo-preview><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>请求差异：不动输入框模拟回归</title><link rel="stylesheet" href="../style.css">
+<title>请求差异：真实流水线空文本预览回归</title><link rel="stylesheet" href="../style.css">
 <style>body{background:#111723;color:#e4e8f0;font:16px system-ui;margin:24px}#extensionsMenu{max-width:400px;border:1px solid #445;margin:16px 0;font-size:17.6px}#extensionsMenu>.extension_container>div{padding:5px;display:flex;gap:10px;align-items:baseline;cursor:pointer}.extensionsMenuExtensionButton{width:20px}textarea{width:min(700px,100%);height:80px;background:#222c3b;color:inherit}#checks{font-size:13px}body.compact{max-width:360px;margin:8px}</style>
-<h1>真实 N−1→下一次 N 回归（内存模拟）</h1><p>BASE 只来自正常发送；空文本不读取草稿，只读草稿不改动输入框。预览不增加模型传输，真实发送后可以查看最近真实请求对。</p>
-<label for="send_textarea">你的草稿（模拟后必须保持原样）</label><br><textarea id="send_textarea">第 N 次：去海边（不要清空我的草稿）</textarea>
+<h1>真实流水线空文本预览回归（内存模拟）</h1><p>预览与正常发送走同一条组装流程，只在最终 fetch 边界截断；强制空文本，因此不新增用户消息、不改动草稿、不发模型请求。BASE 只来自成功响应的真实发送。</p>
+<label for="send_textarea">你的草稿（预览要求为空，fixture 不会替你清空）</label><br><textarea id="send_textarea"></textarea>
 <label for="world">模拟世界设定</label><input id="world" value="原始世界设定">
 <div id="extensionsMenu"></div><p id="checks" role="status"></p><button id="actual">模拟一次正常发送（假的传输）</button>
 <script type="module">
 import {createExactCapture} from '../exact-capture.js';
 import {initDiagnostics} from '../index.js';
 const query=new URLSearchParams(location.search);if(query.has('compact'))document.body.classList.add('compact');
-let delegated=0,stopped=0,phase='idle',cleaned=false,composerReads=0;
+let delegated=0,stopped=0,phase='idle',cleaned=false,composerReads=0,dryRunSeen=null;
 const hooks=new Map();
 const source={on(e,f){hooks.set(e,[...(hooks.get(e)||[]),f])},removeListener(e,f){hooks.set(e,(hooks.get(e)||[]).filter(h=>h!==f))},async emit(e,...args){for(const hook of [...(hooks.get(e)||[])])await hook(...args)}};
 const host={location:{origin:location.origin},async fetch(url,opts){delegated++;return new Response('{}',{status:200})}};
-const state={characterId:0,chatId:'mock-chat',groupId:null,chat:[{name:'角色',is_user:false,mes:'开场白'},{name:'用户',is_user:true,mes:'你好'}]};
-const original=state.chat.slice();
-const ctx=()=>({...state,mainApi:'openai',name1:'用户',eventSource:source,eventTypes:{GENERATE_AFTER_DATA:'after',CHAT_COMPLETION_SETTINGS_READY:'ready'},
- async generate(type,options={},dryRun=false){phase='assembling';cleaned=false;try{
-  if(!dryRun)state.chat.push({name:'用户',is_user:true,mes:'真实输入',send_date:'mock'});
+const state={characterId:0,chatId:'mock-chat',groupId:null,chat:[{name:'角色',is_user:false,mes:'开场白'}]};
+// Mirrors the audited ST behaviour: an ordinary 'normal' send appends the composer text only
+// when there is text; an empty composer adds nothing. Generation is 'continue' only from the
+// click handler, which this fixture bypasses, so empty always assembles the existing history.
+const ctx=()=>({...state,mainApi:'openai',name1:'用户',eventSource:source,eventTypes:{CHAT_COMPLETION_SETTINGS_READY:'ready'},
+ async generate(type,options={},dryRun){dryRunSeen=dryRun;phase='assembling';cleaned=false;try{
+  const text=document.getElementById('send_textarea').value;
+  if(text&&!dryRun)state.chat.push({name:'用户',is_user:true,mes:text,send_date:'mock'});
   const packet={prompt:[{role:'system',content:document.getElementById('world').value},...state.chat.map(m=>({role:m.is_user?'user':'assistant',content:m.mes}))]};
-  await source.emit('after',packet,dryRun);
   if(dryRun)return;
   const body={type:'normal',model:'mock-model',chat_completion_source:'custom',messages:packet.prompt};await source.emit('ready',body);
   await host.fetch('/api/backends/chat-completions/generate',{method:'POST',body:JSON.stringify(body)});
  }finally{phase='idle';cleaned=true}},
- async deleteMessage(){throw Error('模拟不应删除消息')} });
-const runtime=createExactCapture({host,getContext:ctx,isGenerating:()=>phase!=='idle',stopGeneration:()=>{stopped++},dryRunGenerate:c=>c.generate('normal',{},true),getModel:()=> 'mock-model',getSource:()=> 'custom',getInput:()=>{composerReads++;return document.getElementById('send_textarea').value}});
-// Late mutations must be included. No real provider endpoint is used by this fixture.
-source.on('after',async data=>{await Promise.resolve();data.prompt[0].content+='\n晚处理完成';});
-let settled=[];
-async function actual(){await ctx().generate('normal');state.chat.push({name:'角色',is_user:false,mes:'后来收到的回复'});settled=state.chat.slice();}
-if(!query.has('nobaseline'))await actual();
-settled=state.chat.slice();const draft=document.getElementById('send_textarea').value;
-await initDiagnostics(async()=>runtime);document.getElementById('actual').onclick=actual;
-function report(){const last=runtime.getLast();document.getElementById('checks').textContent=`模型传输 ${delegated}（模拟不应增加） · 停止 ${stopped} · 清理 ${cleaned?'PASS':'idle'} · BASE ${last?.messages.length??0} 条 · 真实请求对 ${runtime.getLastPair()?.previous?'READY':'不足两次'} · 输入读取 ${composerReads} · 草稿 ${document.getElementById('send_textarea').value===draft?'PASS':'CHANGED'} · 聊天身份 ${settled.every((m,i)=>state.chat[i]===m)&&state.chat.length===settled.length?'PASS':'CHANGED'}`;}
+ async deleteMessage(index){if(index!==state.chat.length-1)throw Error('bad delete index');state.chat.splice(index,1)} });
+const runtime=createExactCapture({host,getContext:ctx,isGenerating:()=>phase!=='idle',stopGeneration:()=>{stopped++},getInput:()=>{composerReads++;return document.getElementById('send_textarea').value}});
+let settled=[],draft='';
+async function actual(text){const area=document.getElementById('send_textarea');const keep=area.value;area.value=text;try{await ctx().generate('normal')}finally{area.value=keep;settled=state.chat.slice();draft=area.value}}
+if(!query.has('nobaseline'))await actual('你好');
+settled=state.chat.slice();draft=document.getElementById('send_textarea').value;
+await initDiagnostics(async()=>runtime);document.getElementById('actual').onclick=()=>actual('下一个问题');
+function report(){const last=runtime.getLast();document.getElementById('checks').textContent=`模型传输 ${delegated}（预览不应增加） · 停止 ${stopped} · 清理 ${cleaned?'PASS':'idle'} · BASE ${last?.messages.length??0} 条 · 真实请求对 ${runtime.getLastPair()?.previous?'READY':'不足两次'} · 预览dryRun=${String(dryRunSeen)} · 输入读取 ${composerReads} · 草稿 ${document.getElementById('send_textarea').value===draft?'PASS':'CHANGED'} · 聊天身份 ${settled.every((m,i)=>state.chat[i]===m)&&state.chat.length===settled.length?'PASS':'CHANGED'}`;}
 setInterval(report,300);report();
 </script></html>

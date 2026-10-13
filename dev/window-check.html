@@ -9,7 +9,7 @@ import {mountRequestDiff} from '../request-diff-ui.js';
 // Fake host: a 390x664 viewport, and the page itself is scrolled/offset.
 const host={innerWidth:390,innerHeight:664,visualViewport:{width:390,height:664,offsetTop:0,addEventListener(){},removeEventListener(){}},addEventListener(){},removeEventListener(){}};
 document.documentElement.appendChild(document.createElement('div'));
-const runtime={getLast:()=>null,getSimulationBase:()=>null,clear(){},isBusy:()=>false,async simulate(){throw new Error('geometry-only fixture')}}
+const runtime={getLast:()=>null,getLastPair:()=>null,clear(){},isBusy:()=>false,wroteChatMessage:()=>false,async previewNext(){throw new Error('geometry-only fixture')}}
 const lines=[];
 try{
   const app=mountRequestDiff(runtime,document.body,host);
